@@ -23,7 +23,6 @@ import (
 	"github.com/brocaar/chirpstack-simulator/simulator"
 	"github.com/brocaar/lorawan"
 	"github.com/chirpstack/chirpstack/api/go/v4/api"
-	"github.com/chirpstack/chirpstack/api/go/v4/common"
 	"github.com/chirpstack/chirpstack/api/go/v4/gw"
 )
 
@@ -313,26 +312,27 @@ func (s *simulation) tearDownGateways() error {
 }
 
 func (s *simulation) setupDeviceProfile() error {
-	log.Info("simulator: creating device-profile")
+	// log.Info("simulator: creating device-profile")
 
-	dpName, _ := uuid.NewV4()
+	// dpName, _ := uuid.NewV4()
 
-	resp, err := as.DeviceProfile().Create(context.Background(), &api.CreateDeviceProfileRequest{
-		DeviceProfile: &api.DeviceProfile{
-			Name:              dpName.String(),
-			TenantId:          s.tenant.GetId(),
-			MacVersion:        common.MacVersion_LORAWAN_1_0_3,
-			RegParamsRevision: common.RegParamsRevision_B,
-			SupportsOtaa:      true,
-			Region:            common.Region_RU864,
-			AdrAlgorithmId:    "default",
-		},
-	})
-	if err != nil {
-		return errors.Wrap(err, "create device-profile error")
-	}
+	// resp, err := as.DeviceProfile().Create(context.Background(), &api.CreateDeviceProfileRequest{
+	// 	DeviceProfile: &api.DeviceProfile{
+	// 		Name:              dpName.String(),
+	// 		TenantId:          s.tenant.GetId(),
+	// 		MacVersion:        common.MacVersion_LORAWAN_1_0_3,
+	// 		RegParamsRevision: common.RegParamsRevision_B,
+	// 		SupportsOtaa:      true,
+	// 		Region:            common.Region_RU864,
+	// 		AdrAlgorithmId:    "default",
+	// 	},
+	// })
+	// if err != nil {
+	// 	return errors.Wrap(err, "create device-profile error")
+	// }
 
-	dpID, err := uuid.FromString(resp.Id)
+	log.Info("simulator: using existing device-profile")
+	dpID, err := uuid.FromString("98e37811-de41-4da7-9440-f3c8fb35fbb9")
 	if err != nil {
 		return err
 	}
@@ -342,14 +342,14 @@ func (s *simulation) setupDeviceProfile() error {
 }
 
 func (s *simulation) tearDownDeviceProfile() error {
-	log.Info("simulator: tear-down device-profile")
+	// log.Info("simulator: tear-down device-profile")
 
-	_, err := as.DeviceProfile().Delete(context.Background(), &api.DeleteDeviceProfileRequest{
-		Id: s.deviceProfileID.String(),
-	})
-	if err != nil {
-		return errors.Wrap(err, "delete device-profile error")
-	}
+	// _, err := as.DeviceProfile().Delete(context.Background(), &api.DeleteDeviceProfileRequest{
+	// 	Id: s.deviceProfileID.String(),
+	// })
+	// if err != nil {
+	// 	return errors.Wrap(err, "delete device-profile error")
+	// }
 
 	return nil
 }
@@ -357,35 +357,47 @@ func (s *simulation) tearDownDeviceProfile() error {
 func (s *simulation) setupApplication() error {
 	log.Info("simulator: init application")
 
-	appName, err := uuid.NewV4()
-	if err != nil {
-		return err
-	}
+	// appName, err := uuid.NewV4()
+	// if err != nil {
+	// 	return err
+	// }
 
-	createAppResp, err := as.Application().Create(context.Background(), &api.CreateApplicationRequest{
-		Application: &api.Application{
-			Name:        appName.String(),
-			Description: appName.String(),
-			TenantId:    s.tenant.GetId(),
-		},
+	// createAppResp, err := as.Application().Create(context.Background(), &api.CreateApplicationRequest{
+	// 	Application: &api.Application{
+	// 		Name:        appName.String(),
+	// 		Description: appName.String(),
+	// 		TenantId:    s.tenant.GetId(),
+	// 	},
+	// })
+	// if err != nil {
+	// 	return errors.Wrap(err, "create applicaiton error")
+	// }
+	//s.applicationID = createAppResp.Id
+
+	appID := "bfc3a3c5-7509-4ee6-8d76-786910333738"
+
+	log.WithFields(log.Fields{
+		"application_id": appID,
+	}).Info("simulator: retrieving application")
+	a, err := as.Application().Get(context.Background(), &api.GetApplicationRequest{
+		Id: appID,
 	})
 	if err != nil {
-		return errors.Wrap(err, "create applicaiton error")
+		return errors.Wrap(err, "get application error")
 	}
-
-	s.applicationID = createAppResp.Id
+	s.applicationID = a.GetApplication().Id
 	return nil
 }
 
 func (s *simulation) tearDownApplication() error {
-	log.Info("simulator: tear-down application")
+	//log.Info("simulator: tear-down application")
 
-	_, err := as.Application().Delete(context.Background(), &api.DeleteApplicationRequest{
-		Id: s.applicationID,
-	})
-	if err != nil {
-		return errors.Wrap(err, "delete application error")
-	}
+	// _, err := as.Application().Delete(context.Background(), &api.DeleteApplicationRequest{
+	// 	Id: s.applicationID,
+	// })
+	// if err != nil {
+	// 	return errors.Wrap(err, "delete application error")
+	// }
 	return nil
 }
 

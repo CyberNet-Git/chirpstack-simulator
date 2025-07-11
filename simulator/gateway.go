@@ -130,11 +130,12 @@ func WithGatewayID(gatewayID lorawan.EUI64) GatewayOption {
 
 // WithDownlinkTxNackRate sets the rate in which Tx NAck messages are sent.
 // Setting this to:
-//   0: always ACK
-//   1: NAck every message
-//   2: NAck every other message
-//   3: NAck every third message
-//   ...
+//
+//	0: always ACK
+//	1: NAck every message
+//	2: NAck every other message
+//	3: NAck every third message
+//	...
 func WithDownlinkTxNackRate(rate int) GatewayOption {
 	return func(g *Gateway) error {
 		g.downlinkTxNAckRate = rate
