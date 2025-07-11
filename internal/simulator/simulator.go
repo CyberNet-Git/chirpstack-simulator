@@ -278,18 +278,18 @@ func (s *simulation) setupGateways() error {
 		// }
 
 		gatewayID.UnmarshalText([]byte("1020304050607080"))
-		_, err := as.Gateway().Create(context.Background(), &api.CreateGatewayRequest{
-			Gateway: &api.Gateway{
-				GatewayId:   gatewayID.String(),
-				Name:        gatewayID.String(),
-				Description: gatewayID.String(),
-				TenantId:    s.tenant.GetId(),
-				Location:    &common.Location{},
-			},
-		})
-		if err != nil {
-			return errors.Wrap(err, "create gateway error")
-		}
+		// _, err := as.Gateway().Create(context.Background(), &api.CreateGatewayRequest{
+		// 	Gateway: &api.Gateway{
+		// 		GatewayId:   gatewayID.String(),
+		// 		Name:        gatewayID.String(),
+		// 		Description: gatewayID.String(),
+		// 		TenantId:    s.tenant.GetId(),
+		// 		Location:    &common.Location{},
+		// 	},
+		// })
+		// if err != nil {
+		// 	return errors.Wrap(err, "create gateway error")
+		// }
 
 		s.gatewayIDs = append(s.gatewayIDs, gatewayID)
 	}
@@ -298,16 +298,16 @@ func (s *simulation) setupGateways() error {
 }
 
 func (s *simulation) tearDownGateways() error {
-	log.Info("simulator: tear-down gateways")
+	//	log.Info("simulator: tear-down gateways")
 
-	for _, gatewayID := range s.gatewayIDs {
-		_, err := as.Gateway().Delete(context.Background(), &api.DeleteGatewayRequest{
-			GatewayId: gatewayID.String(),
-		})
-		if err != nil {
-			return errors.Wrap(err, "delete gateway error")
-		}
-	}
+	// for _, gatewayID := range s.gatewayIDs {
+	// 	_, err := as.Gateway().Delete(context.Background(), &api.DeleteGatewayRequest{
+	// 		GatewayId: gatewayID.String(),
+	// 	})
+	// 	if err != nil {
+	// 		return errors.Wrap(err, "delete gateway error")
+	// 	}
+	// }
 
 	return nil
 }
