@@ -273,10 +273,11 @@ func (s *simulation) setupGateways() error {
 
 	for i := 0; i < s.gatewayMaxCount; i++ {
 		var gatewayID lorawan.EUI64
-		if _, err := rand.Read(gatewayID[:]); err != nil {
-			return errors.Wrap(err, "read random bytes error")
-		}
+		// if _, err := rand.Read(gatewayID[:]); err != nil {
+		// 	return errors.Wrap(err, "read random bytes error")
+		// }
 
+		gatewayID.UnmarshalText([]byte("1020304050607080"))
 		_, err := as.Gateway().Create(context.Background(), &api.CreateGatewayRequest{
 			Gateway: &api.Gateway{
 				GatewayId:   gatewayID.String(),
