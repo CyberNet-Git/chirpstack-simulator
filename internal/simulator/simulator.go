@@ -324,7 +324,7 @@ func (s *simulation) setupDeviceProfile() error {
 			MacVersion:        common.MacVersion_LORAWAN_1_0_3,
 			RegParamsRevision: common.RegParamsRevision_B,
 			SupportsOtaa:      true,
-			Region:            common.Region_EU868,
+			Region:            common.Region_RU864,
 			AdrAlgorithmId:    "default",
 		},
 	})
