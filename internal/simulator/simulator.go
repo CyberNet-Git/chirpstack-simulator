@@ -2,7 +2,7 @@ package simulator
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/csv"
 	"encoding/hex"
 	"fmt"
 	mrand "math/rand"
@@ -401,32 +401,90 @@ func (s *simulation) tearDownApplication() error {
 	return nil
 }
 
+type Device struct {
+	Name            string
+	DeviceProfileId string
+	DevEui          string
+	NwkKey          string
+	JoinEui         string
+	Description     string
+}
+
+// readDevicesFromCSV читает CSV файл и возвращает массив структур Device
+func readDevicesFromCSV(filePath string) ([]Device, error) {
+	// Открываем CSV файл
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Создаем CSV reader
+	reader := csv.NewReader(file)
+
+	// Читаем все записи
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+
+	var devices []Device
+
+	// Предполагаем, что первая строка - это заголовки
+	// Итерируемся по записям, начиная со второй строки (индекс 1)
+	for i, record := range records {
+		// Пропускаем заголовок
+		if i == 0 {
+			continue
+		}
+
+		// Проверяем, что в строке достаточно полей
+		if len(record) < 4 {
+			return nil, fmt.Errorf("недостаточно полей в строке %d", i+1)
+		}
+
+		device := Device{
+			Name:            record[0],
+			DeviceProfileId: record[1],
+			DevEui:          record[2],
+			NwkKey:          record[3],
+			JoinEui:         record[4],
+			Description:     record[5],
+		}
+
+		devices = append(devices, device)
+	}
+
+	return devices, nil
+}
+
 func (s *simulation) setupDevices() error {
 	log.Info("simulator: init devices")
 
 	var wg sync.WaitGroup
 
-	for i := 0; i < s.deviceCount; i++ {
-		wg.Add(1)
+	devices, err := readDevicesFromCSV("devices.csv")
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	for _, device := range devices {
+		fmt.Printf("%+v\n", device)
+		wg.Add(1)
 		go func() {
 			var devEUI lorawan.EUI64
 			var appKey lorawan.AES128Key
 
-			if _, err := rand.Read(devEUI[:]); err != nil {
-				log.Fatal(err)
-			}
-			if _, err := rand.Read(appKey[:]); err != nil {
-				log.Fatal(err)
-			}
+			devEUI.UnmarshalText([]byte(device.DevEui))
+			appKey.UnmarshalText([]byte(device.NwkKey))
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 				Device: &api.Device{
-					DevEui:          devEUI.String(),
-					Name:            devEUI.String(),
-					Description:     devEUI.String(),
+					DevEui:          device.DevEui,
+					Name:            device.Name,
+					Description:     device.Description,
 					ApplicationId:   s.applicationID,
-					DeviceProfileId: s.deviceProfileID.String(),
+					DeviceProfileId: device.DeviceProfileId, // s.DeviceProfileId.String()
 				},
 			})
 			if err != nil {
@@ -435,11 +493,11 @@ func (s *simulation) setupDevices() error {
 
 			_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
 				DeviceKeys: &api.DeviceKeys{
-					DevEui: devEUI.String(),
+					DevEui: device.DevEui,
 
 					// yes, this is correct for LoRaWAN 1.0.x!
 					// see the API documentation
-					NwkKey: appKey.String(),
+					NwkKey: device.NwkKey,
 				},
 			})
 			if err != nil {
@@ -453,6 +511,54 @@ func (s *simulation) setupDevices() error {
 		}()
 
 	}
+
+	// for i := 0; i < s.deviceCount; i++ {
+	// 	wg.Add(1)
+
+	// go func() {
+	// 	var devEUI lorawan.EUI64
+	// 	var appKey lorawan.AES128Key
+
+	// 	if _, err := rand.Read(devEUI[:]); err != nil {
+	// 		log.Fatal(err)
+	// 	}
+	// 	if _, err := rand.Read(appKey[:]); err != nil {
+	// 		log.Fatal(err)
+	// 	}
+
+	// 	_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
+	// 		Device: &api.Device{
+	// 			DevEui:          devEUI.String(),
+	// 			Name:            devEUI.String(),
+	// 			Description:     devEUI.String(),
+	// 			ApplicationId:   s.applicationID,
+	// 			DeviceProfileId: s.deviceProfileID.String(),
+	// 		},
+	// 	})
+	// 	if err != nil {
+	// 		log.Fatal("create device error, error: %s", err)
+	// 	}
+
+	// 	_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
+	// 		DeviceKeys: &api.DeviceKeys{
+	// 			DevEui: devEUI.String(),
+
+	// 			// yes, this is correct for LoRaWAN 1.0.x!
+	// 			// see the API documentation
+	// 			NwkKey: appKey.String(),
+	// 		},
+	// 	})
+	// 	if err != nil {
+	// 		log.Fatal("create device keys error, error: %s", err)
+	// 	}
+
+	// 	s.deviceAppKeysMutex.Lock()
+	// 	s.deviceAppKeys[devEUI] = appKey
+	// 	s.deviceAppKeysMutex.Unlock()
+	// 	wg.Done()
+	// }()
+
+	//}
 
 	wg.Wait()
 
