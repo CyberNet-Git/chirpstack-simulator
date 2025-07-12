@@ -421,6 +421,8 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 
 	// Создаем CSV reader
 	reader := csv.NewReader(file)
+	reader.Comma = ';'             // Устанавливаем разделитель точка с запятой
+	reader.TrimLeadingSpace = true // Удаляем пробелы в начале полей
 
 	// Читаем все записи
 	records, err := reader.ReadAll()
