@@ -471,18 +471,18 @@ func (s *simulation) setupDevices() error {
 	}
 
 	for _, device := range devices {
-		fmt.Printf("%+v\n", device)
 		wg.Add(1)
 		go func(dev Device) {
 			var devEUI lorawan.EUI64
 			var appKey lorawan.AES128Key
 
+			fmt.Printf("%+v\n", dev)
 			devEUI.UnmarshalText([]byte(dev.DevEui))
 			appKey.UnmarshalText([]byte(dev.NwkKey))
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 				Device: &api.Device{
-					DevEui:          dev.DevEui,
+					DevEui:          devEUI.String(),
 					Name:            dev.Name,
 					Description:     dev.Description,
 					ApplicationId:   s.applicationID,
