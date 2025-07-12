@@ -473,20 +473,20 @@ func (s *simulation) setupDevices() error {
 	for _, device := range devices {
 		fmt.Printf("%+v\n", device)
 		wg.Add(1)
-		go func() {
+		go func(dev Device) {
 			var devEUI lorawan.EUI64
 			var appKey lorawan.AES128Key
 
-			devEUI.UnmarshalText([]byte(device.DevEui))
-			appKey.UnmarshalText([]byte(device.NwkKey))
+			devEUI.UnmarshalText([]byte(dev.DevEui))
+			appKey.UnmarshalText([]byte(dev.NwkKey))
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 				Device: &api.Device{
-					DevEui:          device.DevEui,
-					Name:            device.Name,
-					Description:     device.Description,
+					DevEui:          dev.DevEui,
+					Name:            dev.Name,
+					Description:     dev.Description,
 					ApplicationId:   s.applicationID,
-					DeviceProfileId: device.DeviceProfileId, // s.DeviceProfileId.String()
+					DeviceProfileId: dev.DeviceProfileId, // s.DeviceProfileId.String()
 				},
 			})
 			if err != nil {
@@ -495,11 +495,11 @@ func (s *simulation) setupDevices() error {
 
 			_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
 				DeviceKeys: &api.DeviceKeys{
-					DevEui: device.DevEui,
+					DevEui: dev.DevEui,
 
 					// yes, this is correct for LoRaWAN 1.0.x!
 					// see the API documentation
-					NwkKey: device.NwkKey,
+					NwkKey: dev.NwkKey,
 				},
 			})
 			if err != nil {
@@ -510,7 +510,7 @@ func (s *simulation) setupDevices() error {
 			s.deviceAppKeys[devEUI] = appKey
 			s.deviceAppKeysMutex.Unlock()
 			wg.Done()
-		}()
+		}(device)
 
 	}
 
