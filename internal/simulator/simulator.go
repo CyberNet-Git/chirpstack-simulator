@@ -2,6 +2,7 @@ package simulator
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
@@ -478,7 +479,10 @@ func (s *simulation) setupDevices() error {
 
 			fmt.Printf("%+v\n", dev)
 			devEUI.UnmarshalText([]byte(dev.DevEui))
-			appKey.UnmarshalText([]byte(dev.NwkKey))
+			//			appKey.UnmarshalText([]byte(dev.NwkKey))
+			if _, err := rand.Read(appKey[:]); err != nil {
+				log.Fatal(err)
+			}
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 				Device: &api.Device{
@@ -495,17 +499,18 @@ func (s *simulation) setupDevices() error {
 
 			_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
 				DeviceKeys: &api.DeviceKeys{
-					DevEui: dev.DevEui,
+					DevEui: devEUI.String(),
 
 					// yes, this is correct for LoRaWAN 1.0.x!
 					// see the API documentation
-					NwkKey: dev.NwkKey,
+					NwkKey: appKey.String(),
 				},
 			})
 			if err != nil {
 				log.Fatal("create device keys error, error: %s", err)
 			}
 
+			log.Info("simulator: init device %s %s", devEUI.String(), appKey.String())
 			s.deviceAppKeysMutex.Lock()
 			s.deviceAppKeys[devEUI] = appKey
 			s.deviceAppKeysMutex.Unlock()
