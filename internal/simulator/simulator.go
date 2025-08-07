@@ -2,7 +2,6 @@ package simulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
@@ -416,7 +415,7 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 	// Открываем CSV файл
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка открытия файла %s: %v", filePath, err)
 	}
 	defer file.Close()
 
@@ -428,7 +427,11 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 	// Читаем все записи
 	records, err := reader.ReadAll()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка чтения CSV файла: %v", err)
+	}
+
+	if len(records) == 0 {
+		return nil, fmt.Errorf("CSV файл пустой")
 	}
 
 	var devices []Device
@@ -441,24 +444,72 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 			continue
 		}
 
-		// Проверяем, что в строке достаточно полей
+		// Пропускаем пустые строки
+		if len(record) == 0 || (len(record) == 1 && record[0] == "") {
+			continue
+		}
+
+		// Проверяем, что в строке достаточно полей (минимум 4: Name, Profile, DevEUI, AppKey)
 		if len(record) < 4 {
-			return nil, fmt.Errorf("недостаточно полей в строке %d", i+1)
+			return nil, fmt.Errorf("недостаточно полей в строке %d: ожидается минимум 4 поля, получено %d", i+1, len(record))
+		}
+
+		// Валидируем hex-строки
+		devEUI := record[2]
+		if err := validateHexString(devEUI, 16, "DevEUI"); err != nil {
+			return nil, fmt.Errorf("строка %d: %v", i+1, err)
+		}
+
+		appKey := record[3]
+		if err := validateHexString(appKey, 32, "AppKey"); err != nil {
+			return nil, fmt.Errorf("строка %d: %v", i+1, err)
+		}
+
+		// JoinEUI опционально (может быть пустым)
+		joinEUI := ""
+		if len(record) > 4 && record[4] != "" {
+			joinEUI = record[4]
+			if err := validateHexString(joinEUI, 32, "JoinEUI"); err != nil {
+				return nil, fmt.Errorf("строка %d: %v", i+1, err)
+			}
+		}
+
+		// Description опционально
+		description := ""
+		if len(record) > 5 {
+			description = record[5]
 		}
 
 		device := Device{
 			Name:            record[0],
 			DeviceProfileId: record[1],
-			DevEui:          record[2],
-			NwkKey:          record[3],
-			JoinEui:         record[4],
-			Description:     record[5],
+			DevEui:          devEUI,
+			NwkKey:          appKey,
+			JoinEui:         joinEUI,
+			Description:     description,
 		}
 
 		devices = append(devices, device)
 	}
 
+	if len(devices) == 0 {
+		return nil, fmt.Errorf("не найдено валидных устройств в CSV файле")
+	}
+
 	return devices, nil
+}
+
+// validateHexString проверяет, что строка является валидной hex-строкой заданной длины
+func validateHexString(s string, expectedLength int, fieldName string) error {
+	if len(s) != expectedLength {
+		return fmt.Errorf("%s должен быть длиной %d символов, получено %d", fieldName, expectedLength, len(s))
+	}
+	
+	if _, err := hex.DecodeString(s); err != nil {
+		return fmt.Errorf("%s должен содержать только hex символы (0-9, a-f, A-F): %v", fieldName, err)
+	}
+	
+	return nil
 }
 
 func (s *simulation) setupDevices() error {
@@ -474,14 +525,36 @@ func (s *simulation) setupDevices() error {
 	for _, device := range devices {
 		wg.Add(1)
 		go func(dev Device) {
+			defer wg.Done()
+			
 			var devEUI lorawan.EUI64
 			var appKey lorawan.AES128Key
+			var joinEUI lorawan.EUI64
 
-			fmt.Printf("%+v\n", dev)
-			devEUI.UnmarshalText([]byte(dev.DevEui))
-			//			appKey.UnmarshalText([]byte(dev.NwkKey))
-			if _, err := rand.Read(appKey[:]); err != nil {
-				log.Fatal(err)
+			log.WithFields(log.Fields{
+				"name":        dev.Name,
+				"dev_eui":     dev.DevEui,
+				"description": dev.Description,
+			}).Info("simulator: processing device from CSV")
+
+			// Парсим DevEUI
+			if err := devEUI.UnmarshalText([]byte(dev.DevEui)); err != nil {
+				log.WithError(err).WithField("dev_eui", dev.DevEui).Error("simulator: invalid DevEUI")
+				return
+			}
+
+			// Парсим AppKey
+			if err := appKey.UnmarshalText([]byte(dev.NwkKey)); err != nil {
+				log.WithError(err).WithField("app_key", dev.NwkKey).Error("simulator: invalid AppKey")
+				return
+			}
+
+			// Парсим JoinEUI если он указан
+			if dev.JoinEui != "" {
+				if err := joinEUI.UnmarshalText([]byte(dev.JoinEui)); err != nil {
+					log.WithError(err).WithField("join_eui", dev.JoinEui).Error("simulator: invalid JoinEUI")
+					return
+				}
 			}
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
@@ -510,11 +583,15 @@ func (s *simulation) setupDevices() error {
 				log.Fatal("create device keys error, error: %s", err)
 			}
 
-			log.Info("simulator: init device %s %s", devEUI.String(), appKey.String())
+			log.WithFields(log.Fields{
+				"dev_eui":  devEUI.String(),
+				"app_key":  appKey.String(),
+				"name":     dev.Name,
+			}).Info("simulator: device initialized successfully")
+			
 			s.deviceAppKeysMutex.Lock()
 			s.deviceAppKeys[devEUI] = appKey
 			s.deviceAppKeysMutex.Unlock()
-			wg.Done()
 		}(device)
 
 	}
