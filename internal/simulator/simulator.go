@@ -410,6 +410,12 @@ type Device struct {
 	Description     string
 }
 
+// DeviceWithStatus расширяет Device добавляя статус активности
+type DeviceWithStatus struct {
+	Device
+	Active bool
+}
+
 // readDevicesFromCSV читает CSV файл и возвращает массив структур Device
 func readDevicesFromCSV(filePath string) ([]Device, error) {
 	// Открываем CSV файл
@@ -499,8 +505,8 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 	return devices, nil
 }
 
-// validateHexString проверяет, что строка является валидной hex-строкой заданной длины
-func validateHexString(s string, expectedLength int, fieldName string) error {
+// ValidateHexString проверяет, что строка является валидной hex-строкой заданной длины (экспортируемая версия)
+func ValidateHexString(s string, expectedLength int, fieldName string) error {
 	if len(s) != expectedLength {
 		return fmt.Errorf("%s должен быть длиной %d символов, получено %d", fieldName, expectedLength, len(s))
 	}
@@ -510,6 +516,11 @@ func validateHexString(s string, expectedLength int, fieldName string) error {
 	}
 	
 	return nil
+}
+
+// validateHexString проверяет, что строка является валидной hex-строкой заданной длины
+func validateHexString(s string, expectedLength int, fieldName string) error {
+	return ValidateHexString(s, expectedLength, fieldName)
 }
 
 func (s *simulation) setupDevices() error {
@@ -676,6 +687,174 @@ func (s *simulation) setupApplicationIntegration() error {
 	}
 
 	return nil
+}
+
+// CreateSingleDevice создает одно устройство в ChirpStack
+func CreateSingleDevice(device Device) error {
+	var devEUI lorawan.EUI64
+	var appKey lorawan.AES128Key
+	var joinEUI lorawan.EUI64
+
+	// Парсим DevEUI
+	if err := devEUI.UnmarshalText([]byte(device.DevEui)); err != nil {
+		return fmt.Errorf("invalid DevEUI: %v", err)
+	}
+
+	// Парсим AppKey
+	if err := appKey.UnmarshalText([]byte(device.NwkKey)); err != nil {
+		return fmt.Errorf("invalid AppKey: %v", err)
+	}
+
+	// Парсим JoinEUI если указан
+	if device.JoinEui != "" {
+		if err := joinEUI.UnmarshalText([]byte(device.JoinEui)); err != nil {
+			return fmt.Errorf("invalid JoinEUI: %v", err)
+		}
+	}
+
+	// Создаем устройство
+	_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
+		Device: &api.Device{
+			DevEui:          devEUI.String(),
+			Name:            device.Name,
+			Description:     device.Description,
+			ApplicationId:   "1", // TODO: сделать конфигурируемым
+			DeviceProfileId: device.DeviceProfileId,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create device error: %v", err)
+	}
+
+	// Создаем ключи устройства
+	_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
+		DeviceKeys: &api.DeviceKeys{
+			DevEui: devEUI.String(),
+			NwkKey: appKey.String(),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create device keys error: %v", err)
+	}
+
+	return nil
+}
+
+// DeleteSingleDevice удаляет устройство из ChirpStack
+func DeleteSingleDevice(devEUI string) error {
+	_, err := as.Device().Delete(context.Background(), &api.DeleteDeviceRequest{
+		DevEui: devEUI,
+	})
+	if err != nil {
+		return fmt.Errorf("delete device error: %v", err)
+	}
+
+	return nil
+}
+
+// StartWithDevices запускает симуляцию с конкретным списком устройств
+func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Config, devices []DeviceWithStatus) error {
+	log.WithField("device_count", len(devices)).Info("simulator: starting with custom device list")
+
+	sim := &simulation{
+		deviceAppKeys: make(map[lorawan.EUI64]lorawan.AES128Key),
+	}
+
+	// Заполняем карту ключей устройств
+	for _, device := range devices {
+		if !device.Active {
+			continue // пропускаем неактивные устройства
+		}
+
+		var devEUI lorawan.EUI64
+		var appKey lorawan.AES128Key
+
+		if err := devEUI.UnmarshalText([]byte(device.DevEui)); err != nil {
+			log.WithError(err).WithField("dev_eui", device.DevEui).Error("invalid DevEUI")
+			continue
+		}
+
+		if err := appKey.UnmarshalText([]byte(device.NwkKey)); err != nil {
+			log.WithError(err).WithField("app_key", device.NwkKey).Error("invalid AppKey")
+			continue
+		}
+
+		sim.deviceAppKeys[devEUI] = appKey
+	}
+
+	// Настраиваем интеграцию с приложением
+	if err := sim.setupApplicationIntegration(); err != nil {
+		return errors.Wrap(err, "setup application integration error")
+	}
+
+	// Запускаем симуляцию устройств
+	if err := sim.startDeviceSimulation(ctx, wg); err != nil {
+		return errors.Wrap(err, "start device simulation error")
+	}
+
+	// Ожидаем завершения
+	go func() {
+		<-ctx.Done()
+		log.Info("simulator: stopping simulation")
+		if err := sim.tearDownApplicationIntegration(); err != nil {
+			log.WithError(err).Error("simulator: tear-down application integration error")
+		}
+	}()
+
+	return nil
+}
+
+// startDeviceSimulation запускает симуляцию устройств
+func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGroup) error {
+	log.Info("simulator: starting device simulation")
+
+	// Создаем шлюзы (используем конфигурацию по умолчанию)
+	gws, err := s.createGateways(ctx, wg)
+	if err != nil {
+		return errors.Wrap(err, "create gateways error")
+	}
+
+	// Запускаем устройства
+	for devEUI, appKey := range s.deviceAppKeys {
+		go func(devEUI lorawan.EUI64, appKey lorawan.AES128Key) {
+			// Создаем устройство симулятора
+			_, err := simulator.NewDevice(
+				ctx,
+				wg,
+				simulator.WithDevEUI(devEUI),
+				simulator.WithAppKey(appKey),
+				simulator.WithGateways(gws),
+				simulator.WithUplinkInterval(time.Duration(10)*time.Second), // TODO: сделать конфигурируемым
+			)
+			if err != nil {
+				log.WithError(err).WithField("dev_eui", devEUI).Error("create device error")
+				return
+			}
+
+			log.WithField("dev_eui", devEUI).Info("simulator: device simulation started")
+		}(devEUI, appKey)
+	}
+
+	return nil
+}
+
+// createGateways создает шлюзы для симуляции (упрощенная версия)
+func (s *simulation) createGateways(ctx context.Context, wg *sync.WaitGroup) ([]*simulator.Gateway, error) {
+	// Создаем один шлюз для симуляции
+	var gatewayID lorawan.EUI64
+	copy(gatewayID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	
+	gw, err := simulator.NewGateway(
+		simulator.WithGatewayID(gatewayID),
+		simulator.WithMQTTClient(ns.Client()),
+		simulator.WithEventTopicTemplate("gateway/+/event/+"),
+		simulator.WithCommandTopicTemplate("gateway/+/command/+"),
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "create gateway error")
+	}
+
+	return []*simulator.Gateway{gw}, nil
 }
 
 func (s *simulation) tearDownApplicationIntegration() error {
