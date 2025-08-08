@@ -21,9 +21,9 @@ import (
 )
 
 var (
-	deviceFile   string
-	statusFile   string
-	action       string
+	deviceFile string
+	statusFile string
+	action     string
 )
 
 // DeviceStatus представляет статус устройства
@@ -181,7 +181,7 @@ func readDevicesFromCSVWithStatus(filePath string) ([]simulator.DeviceWithStatus
 		joinEUI := ""
 		if len(record) > 4 && record[4] != "" {
 			joinEUI = record[4]
-			if err := simulator.ValidateHexString(joinEUI, 32, "JoinEUI"); err != nil {
+			if err := simulator.ValidateHexString(joinEUI, 16, "JoinEUI"); err != nil {
 				return nil, fmt.Errorf("строка %d: %v", i+1, err)
 			}
 		}
@@ -421,16 +421,16 @@ func showDeviceStatus(cmd *cobra.Command, args []string) error {
 		if status.Active {
 			activeStr = "Да"
 		}
-		
+
 		lastSeen := status.LastSeen
 		if lastSeen == "" {
 			lastSeen = "Никогда"
 		}
 
-		fmt.Printf("%-20s %-30s %-10s %-20s\n", 
-			status.DevEUI, 
-			status.Name, 
-			activeStr, 
+		fmt.Printf("%-20s %-30s %-10s %-20s\n",
+			status.DevEUI,
+			status.Name,
+			activeStr,
 			lastSeen)
 	}
 

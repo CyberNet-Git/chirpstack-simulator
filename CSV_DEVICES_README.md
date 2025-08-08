@@ -23,8 +23,8 @@ Name (string);Profile;DevEUI (hex string);AppKey (hex string);Join EUI (опци
 1. **Name** (обязательное) - имя устройства
 2. **Profile** (обязательное) - ID профиля устройства (UUID)
 3. **DevEUI** (обязательное) - уникальный идентификатор устройства (16 hex символов)
-4. **AppKey** (обязательное) - ключ приложения (32 hex символа)
-5. **JoinEUI** (опциональное) - идентификатор присоединения (32 hex символа)
+4. **AppKey** (обязательное) - ключ приложения (32 hex символа). Каждый AppKey должен быть уникальным для каждого устройства.
+5. **JoinEUI** (опциональное) - идентификатор присоединения (16 hex символов)
 6. **Description** (опциональное) - описание устройства
 7. **Active** (опциональное) - статус активности устройства (true/false, по умолчанию true)
 
@@ -32,8 +32,8 @@ Name (string);Profile;DevEUI (hex string);AppKey (hex string);Join EUI (опци
 
 ```csv
 Name (string);Profile;DevEUI (hex string);AppKey (hex string);Join EUI (опционально) (hex string);Description (string);Active (true/false)
-lorawan-emulator-01;98e37811-de41-4da7-9440-f3c8fb35fbb9;7700000000000001;2b7e151628aed2a6abf7158809cf4f3c;10000000000000000000000000000000;LoRaWAN сенсор 1;true
-lorawan-emulator-02;98e37811-de41-4da7-9440-f3c8fb35fbb9;7700000000000002;2b7e151628aed2a6abf7158809cf4f3c;10000000000000000000000000000000;LoRaWAN сенсор 2;false
+lorawan-emulator-01;98e37811-de41-4da7-9440-f3c8fb35fbb9;7700000000000001;a1b2c3d4e5f678901234567890abcdef;1000000000000000;LoRaWAN сенсор 1;true
+lorawan-emulator-02;98e37811-de41-4da7-9440-f3c8fb35fbb9;7700000000000002;b2c3d4e5f678901234567890abcdefa1;1000000000000000;LoRaWAN сенсор 2;false
 ```
 
 ## Валидация данных
@@ -43,7 +43,7 @@ lorawan-emulator-02;98e37811-de41-4da7-9440-f3c8fb35fbb9;7700000000000002;2b7e15
 - ✅ Наличие обязательных полей (Name, Profile, DevEUI, AppKey)
 - ✅ Корректность hex-строк для DevEUI (16 символов)
 - ✅ Корректность hex-строк для AppKey (32 символа)  
-- ✅ Корректность hex-строк для JoinEUI (32 символа, если указан)
+- ✅ Корректность hex-строк для JoinEUI (16 символов, если указан)
 - ✅ Валидация статуса активности (поддерживает: true/false, 1/0, active/inactive, да/нет)
 - ✅ Пропуск пустых строк
 - ✅ Детальные сообщения об ошибках с указанием номера строки

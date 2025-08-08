@@ -25,8 +25,8 @@ func main() {
 	sgw, err := simulator.NewGateway(
 		simulator.WithMQTTCredentials("localhost:1883", "", ""),
 		simulator.WithGatewayID(gatewayID),
-		simulator.WithEventTopicTemplate("eu868/gateway/{{ .GatewayID }}/event/{{ .Event }}"),
-		simulator.WithCommandTopicTemplate("eu868/gateway/{{ .GatewayID }}/command/{{ .Command }}"),
+		simulator.WithEventTopicTemplate("ru864/gateway/{{ .GatewayID }}/event/{{ .Event }}"),
+		simulator.WithCommandTopicTemplate("ru864/gateway/{{ .GatewayID }}/command/{{ .Command }}"),
 	)
 	if err != nil {
 		panic(err)

@@ -89,6 +89,7 @@ type simulation struct {
 	gatewayIDs           []lorawan.EUI64
 	deviceAppKeysMutex   sync.Mutex
 	deviceAppKeys        map[lorawan.EUI64]lorawan.AES128Key
+	deviceJoinEUIs       map[lorawan.EUI64]lorawan.EUI64
 	eventTopicTemplate   string
 	commandTopicTemplate string
 }
@@ -276,7 +277,8 @@ func (s *simulation) setupGateways() error {
 		// 	return errors.Wrap(err, "read random bytes error")
 		// }
 
-		gatewayID.UnmarshalText([]byte("1020304050607080"))
+		// Используем прямое присваивание байтов для правильного порядка
+		gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
 		// _, err := as.Gateway().Create(context.Background(), &api.CreateGatewayRequest{
 		// 	Gateway: &api.Gateway{
 		// 		GatewayId:   gatewayID.String(),
@@ -475,7 +477,7 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 		joinEUI := ""
 		if len(record) > 4 && record[4] != "" {
 			joinEUI = record[4]
-			if err := validateHexString(joinEUI, 32, "JoinEUI"); err != nil {
+			if err := validateHexString(joinEUI, 16, "JoinEUI"); err != nil {
 				return nil, fmt.Errorf("строка %d: %v", i+1, err)
 			}
 		}
@@ -510,11 +512,11 @@ func ValidateHexString(s string, expectedLength int, fieldName string) error {
 	if len(s) != expectedLength {
 		return fmt.Errorf("%s должен быть длиной %d символов, получено %d", fieldName, expectedLength, len(s))
 	}
-	
+
 	if _, err := hex.DecodeString(s); err != nil {
 		return fmt.Errorf("%s должен содержать только hex символы (0-9, a-f, A-F): %v", fieldName, err)
 	}
-	
+
 	return nil
 }
 
@@ -537,7 +539,7 @@ func (s *simulation) setupDevices() error {
 		wg.Add(1)
 		go func(dev Device) {
 			defer wg.Done()
-			
+
 			var devEUI lorawan.EUI64
 			var appKey lorawan.AES128Key
 			var joinEUI lorawan.EUI64
@@ -595,11 +597,11 @@ func (s *simulation) setupDevices() error {
 			}
 
 			log.WithFields(log.Fields{
-				"dev_eui":  devEUI.String(),
-				"app_key":  appKey.String(),
-				"name":     dev.Name,
+				"dev_eui": devEUI.String(),
+				"app_key": appKey.String(),
+				"name":    dev.Name,
 			}).Info("simulator: device initialized successfully")
-			
+
 			s.deviceAppKeysMutex.Lock()
 			s.deviceAppKeys[devEUI] = appKey
 			s.deviceAppKeysMutex.Unlock()
@@ -712,14 +714,20 @@ func CreateSingleDevice(device Device) error {
 		}
 	}
 
+	// Валидируем DeviceProfileId
+	deviceProfileID, err := uuid.FromString(device.DeviceProfileId)
+	if err != nil {
+		return fmt.Errorf("invalid DeviceProfileId: %v", err)
+	}
+
 	// Создаем устройство
-	_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
+	_, err = as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 		Device: &api.Device{
 			DevEui:          devEUI.String(),
 			Name:            device.Name,
 			Description:     device.Description,
-			ApplicationId:   "1", // TODO: сделать конфигурируемым
-			DeviceProfileId: device.DeviceProfileId,
+			ApplicationId:   "bfc3a3c5-7509-4ee6-8d76-786910333738", // Используем тот же ID что и в основной симуляции
+			DeviceProfileId: deviceProfileID.String(),
 		},
 	})
 	if err != nil {
@@ -757,7 +765,8 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 	log.WithField("device_count", len(devices)).Info("simulator: starting with custom device list")
 
 	sim := &simulation{
-		deviceAppKeys: make(map[lorawan.EUI64]lorawan.AES128Key),
+		deviceAppKeys:  make(map[lorawan.EUI64]lorawan.AES128Key),
+		deviceJoinEUIs: make(map[lorawan.EUI64]lorawan.EUI64),
 	}
 
 	// Заполняем карту ключей устройств
@@ -779,7 +788,20 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 			continue
 		}
 
+		// Парсим JoinEUI если указан
+		var joinEUI lorawan.EUI64
+		if device.JoinEui != "" {
+			if err := joinEUI.UnmarshalText([]byte(device.JoinEui)); err != nil {
+				log.WithError(err).WithField("join_eui", device.JoinEui).Error("invalid JoinEUI")
+				continue
+			}
+		} else {
+			// Используем стандартный JoinEUI если не указан
+			joinEUI = lorawan.EUI64{0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+		}
+
 		sim.deviceAppKeys[devEUI] = appKey
+		sim.deviceJoinEUIs[devEUI] = joinEUI
 	}
 
 	// Настраиваем интеграцию с приложением
@@ -807,24 +829,55 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 // startDeviceSimulation запускает симуляцию устройств
 func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGroup) error {
 	log.Info("simulator: starting device simulation")
+	log.WithField("device_count", len(s.deviceAppKeys)).Info("simulator: number of devices to simulate")
 
 	// Создаем шлюзы (используем конфигурацию по умолчанию)
 	gws, err := s.createGateways(ctx, wg)
 	if err != nil {
 		return errors.Wrap(err, "create gateways error")
 	}
+	log.WithField("gateway_count", len(gws)).Info("simulator: gateways created")
 
 	// Запускаем устройства
+	deviceCount := 0
 	for devEUI, appKey := range s.deviceAppKeys {
 		go func(devEUI lorawan.EUI64, appKey lorawan.AES128Key) {
-			// Создаем устройство симулятора
+			// Получаем JoinEUI из карты
+			joinEUI, exists := s.deviceJoinEUIs[devEUI]
+			if !exists {
+				log.WithField("dev_eui", devEUI).Error("JoinEUI not found for device")
+				return
+			}
+
+			log.WithFields(log.Fields{
+				"dev_eui":  devEUI,
+				"join_eui": joinEUI,
+			}).Info("simulator: creating device")
+
+			// Создаем устройство симулятора с правильными параметрами для OTAA
 			_, err := simulator.NewDevice(
 				ctx,
 				wg,
 				simulator.WithDevEUI(devEUI),
+				simulator.WithJoinEUI(joinEUI),
 				simulator.WithAppKey(appKey),
+				simulator.WithRandomDevNonce(),
 				simulator.WithGateways(gws),
-				simulator.WithUplinkInterval(time.Duration(10)*time.Second), // TODO: сделать конфигурируемым
+				simulator.WithOTAADelay(time.Duration(2)*time.Second),         // Задержка перед отправкой join-запроса
+				simulator.WithUplinkInterval(time.Duration(30)*time.Second),   // Интервал между uplink пакетами
+				simulator.WithUplinkPayload(false, 10, []byte{1, 2, 3, 4, 5}), // Payload для uplink
+				simulator.WithUplinkTXInfo(gw.UplinkTxInfo{
+					Frequency: 864100000, // RU864 канал 0 (864.1 MHz)
+					Modulation: &gw.Modulation{
+						Parameters: &gw.Modulation_Lora{
+							Lora: &gw.LoraModulationInfo{
+								Bandwidth:       125000,
+								SpreadingFactor: 7,
+								CodeRate:        gw.CodeRate_CR_4_5,
+							},
+						},
+					},
+				}),
 			)
 			if err != nil {
 				log.WithError(err).WithField("dev_eui", devEUI).Error("create device error")
@@ -833,7 +886,10 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 
 			log.WithField("dev_eui", devEUI).Info("simulator: device simulation started")
 		}(devEUI, appKey)
+		deviceCount++
 	}
+
+	log.WithField("devices_started", deviceCount).Info("simulator: all devices started")
 
 	return nil
 }
@@ -842,13 +898,14 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 func (s *simulation) createGateways(ctx context.Context, wg *sync.WaitGroup) ([]*simulator.Gateway, error) {
 	// Создаем один шлюз для симуляции
 	var gatewayID lorawan.EUI64
-	copy(gatewayID[:], []byte{1, 2, 3, 4, 5, 6, 7, 8})
-	
+	// Используем прямое присваивание байтов для правильного порядка
+	gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+
 	gw, err := simulator.NewGateway(
 		simulator.WithGatewayID(gatewayID),
 		simulator.WithMQTTClient(ns.Client()),
-		simulator.WithEventTopicTemplate("gateway/+/event/+"),
-		simulator.WithCommandTopicTemplate("gateway/+/command/+"),
+		simulator.WithEventTopicTemplate("ru864/gateway/{{ .GatewayID }}/event/{{ .Event }}"),
+		simulator.WithCommandTopicTemplate("ru864/gateway/{{ .GatewayID }}/command/{{ .Command }}"),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "create gateway error")
