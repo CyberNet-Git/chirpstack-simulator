@@ -769,6 +769,39 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 		deviceJoinEUIs: make(map[lorawan.EUI64]lorawan.EUI64),
 	}
 
+	// Align runtime parameters with main simulation using configuration
+	if len(config.Simulator) > 0 {
+		sc := config.Simulator[0]
+		sim.uplinkInterval = sc.Device.UplinkInterval
+		sim.fPort = sc.Device.FPort
+		sim.activationTime = sc.ActivationTime
+		sim.duration = sc.Duration
+		// Decode HEX payload (fallback to empty on error)
+		if pl, err := hex.DecodeString(sc.Device.Payload); err == nil {
+			sim.payload = pl
+		} else {
+			log.WithError(err).Warn("simulator: invalid payload in config, using empty payload")
+			sim.payload = []byte{}
+		}
+		sim.frequency = sc.Device.Frequency
+		sim.bandwidth = sc.Device.Bandwidth
+		sim.spreadingFactor = sc.Device.SpreadingFactor
+		sim.eventTopicTemplate = sc.Gateway.EventTopicTemplate
+		sim.commandTopicTemplate = sc.Gateway.CommandTopicTemplate
+	} else {
+		// Sensible defaults if config not provided
+		sim.uplinkInterval = 30 * time.Second
+		sim.fPort = 10
+		sim.payload = []byte{1, 2, 3, 4, 5}
+		sim.frequency = 868100000
+		sim.bandwidth = 125000
+		sim.spreadingFactor = 7
+		sim.activationTime = 1 * time.Minute
+		sim.duration = 0 // infinite by default
+		sim.eventTopicTemplate = "ru868/gateway/{{ .GatewayID }}/event/{{ .Event }}"
+		sim.commandTopicTemplate = "ru868/gateway/{{ .GatewayID }}/command/{{ .Command }}"
+	}
+
 	// Заполняем карту ключей устройств
 	for _, device := range devices {
 		if !device.Active {
@@ -804,7 +837,10 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 		sim.deviceJoinEUIs[devEUI] = joinEUI
 	}
 
-	// Настраиваем интеграцию с приложением
+	// Настраиваем приложение и интеграцию, как в основной симуляции
+	if err := sim.setupApplication(); err != nil {
+		return errors.Wrap(err, "setup application error")
+	}
 	if err := sim.setupApplicationIntegration(); err != nil {
 		return errors.Wrap(err, "setup application integration error")
 	}
@@ -831,6 +867,14 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 	log.Info("simulator: starting device simulation")
 	log.WithField("device_count", len(s.deviceAppKeys)).Info("simulator: number of devices to simulate")
 
+	// Применяем duration из конфига как в основной симуляции
+	if s.duration != 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.duration)
+		defer cancel()
+		log.WithField("duration", s.duration).Info("simulator: simulation will run for duration")
+	}
+
 	// Создаем шлюзы (используем конфигурацию по умолчанию)
 	gws, err := s.createGateways(ctx, wg)
 	if err != nil {
@@ -855,6 +899,8 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 			}).Info("simulator: creating device")
 
 			// Создаем устройство симулятора с правильными параметрами для OTAA
+			// Используем activationTime для рандомизации OTAA delay как в основной симуляции
+			otaaDelay := time.Duration(mrand.Int63n(int64(s.activationTime)))
 			_, err := simulator.NewDevice(
 				ctx,
 				wg,
@@ -863,16 +909,16 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 				simulator.WithAppKey(appKey),
 				simulator.WithRandomDevNonce(),
 				simulator.WithGateways(gws),
-				simulator.WithOTAADelay(time.Duration(2)*time.Second),         // Задержка перед отправкой join-запроса
-				simulator.WithUplinkInterval(time.Duration(30)*time.Second),   // Интервал между uplink пакетами
-				simulator.WithUplinkPayload(false, 10, []byte{1, 2, 3, 4, 5}), // Payload для uplink
+				simulator.WithOTAADelay(otaaDelay),
+				simulator.WithUplinkInterval(s.uplinkInterval),
+				simulator.WithUplinkPayload(false, s.fPort, s.payload),
 				simulator.WithUplinkTXInfo(gw.UplinkTxInfo{
-					Frequency: 864100000, // RU864 канал 0 (864.1 MHz)
+					Frequency: uint32(s.frequency),
 					Modulation: &gw.Modulation{
 						Parameters: &gw.Modulation_Lora{
 							Lora: &gw.LoraModulationInfo{
-								Bandwidth:       125000,
-								SpreadingFactor: 7,
+								Bandwidth:       uint32(s.bandwidth),
+								SpreadingFactor: uint32(s.spreadingFactor),
 								CodeRate:        gw.CodeRate_CR_4_5,
 							},
 						},
@@ -904,8 +950,8 @@ func (s *simulation) createGateways(ctx context.Context, wg *sync.WaitGroup) ([]
 	gw, err := simulator.NewGateway(
 		simulator.WithGatewayID(gatewayID),
 		simulator.WithMQTTClient(ns.Client()),
-		simulator.WithEventTopicTemplate("ru864/gateway/{{ .GatewayID }}/event/{{ .Event }}"),
-		simulator.WithCommandTopicTemplate("ru864/gateway/{{ .GatewayID }}/command/{{ .Command }}"),
+		simulator.WithEventTopicTemplate(s.eventTopicTemplate),
+		simulator.WithCommandTopicTemplate(s.commandTopicTemplate),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "create gateway error")

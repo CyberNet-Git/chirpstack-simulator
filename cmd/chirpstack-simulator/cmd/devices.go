@@ -376,6 +376,23 @@ func simulateDevices(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Создаем устройства (как в основной симуляции)
+	log.Info("Проверка/создание устройств перед симуляцией")
+	var createWG sync.WaitGroup
+	for _, dev := range activeDevices {
+		createWG.Add(1)
+		go func(d simulator.DeviceWithStatus) {
+			defer createWG.Done()
+			if err := simulator.CreateSingleDevice(d.Device); err != nil {
+				// Если уже существует или другая ошибка — логируем и продолжаем
+				log.WithError(err).WithField("dev_eui", d.DevEui).Warn("ошибка создания устройства (возможно уже существует)")
+			} else {
+				log.WithField("dev_eui", d.DevEui).Info("устройство создано")
+			}
+		}(dev)
+	}
+	createWG.Wait()
+
 	// Запускаем симуляцию с активными устройствами
 	if err := simulator.StartWithDevices(ctx, &wg, config.C, activeDevices); err != nil {
 		return errors.Wrap(err, "ошибка запуска симуляции")
