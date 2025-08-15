@@ -44,6 +44,8 @@ func Start(ctx context.Context, wg *sync.WaitGroup, c config.Config) error {
 			ctx:                  ctx,
 			wg:                   wg,
 			tenantID:             c.TenantID,
+			gatewayID:            c.GatewayID,
+			appID:                c.AppID,
 			deviceCount:          c.Device.Count,
 			activationTime:       c.ActivationTime,
 			uplinkInterval:       c.Device.UplinkInterval,
@@ -70,6 +72,8 @@ type simulation struct {
 	ctx             context.Context
 	wg              *sync.WaitGroup
 	tenantID        string
+	gatewayID       string
+	appID           string
 	deviceCount     int
 	gatewayMinCount int
 	gatewayMaxCount int
@@ -83,15 +87,18 @@ type simulation struct {
 	bandwidth       int
 	spreadingFactor int
 
-	tenant               *api.Tenant
-	deviceProfileID      uuid.UUID
-	applicationID        string
-	gatewayIDs           []lorawan.EUI64
-	deviceAppKeysMutex   sync.Mutex
-	deviceAppKeys        map[lorawan.EUI64]lorawan.AES128Key
-	deviceJoinEUIs       map[lorawan.EUI64]lorawan.EUI64
-	eventTopicTemplate   string
-	commandTopicTemplate string
+	tenant                  *api.Tenant
+	deviceProfileID         uuid.UUID
+	applicationID           string
+	gatewayIDs              []lorawan.EUI64
+	deviceAppKeysMutex      sync.Mutex
+	deviceAppKeys           map[lorawan.EUI64]lorawan.AES128Key
+	deviceJoinEUIsMutex     sync.Mutex
+	deviceJoinEUIs          map[lorawan.EUI64]lorawan.EUI64
+	deviceProcessorIDsMutex sync.Mutex
+	deviceProcessorIDs      map[lorawan.EUI64]string
+	eventTopicTemplate      string
+	commandTopicTemplate    string
 }
 
 func (s *simulation) start() {
@@ -171,6 +178,13 @@ func (s *simulation) tearDown() error {
 }
 
 func (s *simulation) runSimulation() error {
+	log.Info("simulator: runSimulation called - starting simulation")
+	log.WithFields(log.Fields{
+		"device_count":       len(s.deviceAppKeys),
+		"join_eui_count":     len(s.deviceJoinEUIs),
+		"processor_id_count": len(s.deviceProcessorIDs),
+	}).Info("simulator: device maps state in runSimulation")
+
 	var gateways []*simulator.Gateway
 	var devices []*simulator.Device
 
@@ -195,6 +209,8 @@ func (s *simulation) runSimulation() error {
 	defer cancel()
 
 	for devEUI, appKey := range s.deviceAppKeys {
+		log.WithField("dev_eui", devEUI).Info("simulator: creating device for simulation")
+
 		devGateways := make(map[int]*simulator.Gateway)
 		devNumGateways := s.gatewayMinCount + mrand.Intn(s.gatewayMaxCount-s.gatewayMinCount+1)
 
@@ -209,9 +225,18 @@ func (s *simulation) runSimulation() error {
 			gws = append(gws, devGateways[k])
 		}
 
+		// Получаем ProcessorID для устройства
+		processorID, exists := s.deviceProcessorIDs[devEUI]
+		if !exists {
+			log.WithField("dev_eui", devEUI).Warn("simulator: processor ID not found for device, using default")
+			processorID = "none"
+		}
+
 		d, err := simulator.NewDevice(ctx, &wg,
 			simulator.WithDevEUI(devEUI),
 			simulator.WithAppKey(appKey),
+			simulator.WithJoinEUI(s.deviceJoinEUIs[devEUI]),
+			simulator.WithProcessorID(processorID),
 			simulator.WithUplinkInterval(s.uplinkInterval),
 			simulator.WithOTAADelay(time.Duration(mrand.Int63n(int64(s.activationTime)))),
 			simulator.WithUplinkPayload(false, s.fPort, s.payload),
@@ -233,8 +258,11 @@ func (s *simulation) runSimulation() error {
 			return errors.Wrap(err, "new device error")
 		}
 
+		log.WithField("dev_eui", devEUI).Info("simulator: device created successfully for simulation")
 		devices = append(devices, d)
 	}
+
+	log.WithField("total_devices", len(devices)).Info("simulator: all devices created, starting simulation")
 
 	go func() {
 		sigChan := make(chan os.Signal)
@@ -273,12 +301,24 @@ func (s *simulation) setupGateways() error {
 
 	for i := 0; i < s.gatewayMaxCount; i++ {
 		var gatewayID lorawan.EUI64
+
+		// Если gatewayID задан в конфигурации, используем его
+		if s.gatewayID != "" {
+			// Парсим gatewayID из строки в EUI64
+			if err := gatewayID.UnmarshalText([]byte(s.gatewayID)); err != nil {
+				log.WithError(err).Warn("simulator: failed to parse gateway_id from config, using default")
+				// Используем прямое присваивание байтов для правильного порядка
+				gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+			}
+		} else {
+			// Используем прямое присваивание байтов для правильного порядка
+			gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+		}
+
 		// if _, err := rand.Read(gatewayID[:]); err != nil {
 		// 	return errors.Wrap(err, "read random bytes error")
 		// }
 
-		// Используем прямое присваивание байтов для правильного порядка
-		gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
 		// _, err := as.Gateway().Create(context.Background(), &api.CreateGatewayRequest{
 		// 	Gateway: &api.Gateway{
 		// 		GatewayId:   gatewayID.String(),
@@ -334,7 +374,7 @@ func (s *simulation) setupDeviceProfile() error {
 	// }
 
 	log.Info("simulator: using existing device-profile")
-	dpID, err := uuid.FromString("98e37811-de41-4da7-9440-f3c8fb35fbb9")
+	dpID, err := uuid.FromString("6530f031-1a45-4578-8659-56f43a2ce8ad")
 	if err != nil {
 		return err
 	}
@@ -376,7 +416,12 @@ func (s *simulation) setupApplication() error {
 	// }
 	//s.applicationID = createAppResp.Id
 
-	appID := "bfc3a3c5-7509-4ee6-8d76-786910333738"
+	// Если appID задан в конфигурации, используем его, иначе используем значение по умолчанию
+	appID := s.appID
+	if appID == "" {
+		appID = "47924079-ed92-4a16-9b99-3a81ef434360"
+		log.Info("simulator: app_id not specified in config, using default")
+	}
 
 	log.WithFields(log.Fields{
 		"application_id": appID,
@@ -409,6 +454,7 @@ type Device struct {
 	DevEui          string
 	NwkKey          string
 	JoinEui         string
+	ProcessorID     string
 	Description     string
 }
 
@@ -482,10 +528,16 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 			}
 		}
 
+		// ProcessorID опционально
+		processorID := ""
+		if len(record) > 5 && record[5] != "" {
+			processorID = record[5]
+		}
+
 		// Description опционально
 		description := ""
-		if len(record) > 5 {
-			description = record[5]
+		if len(record) > 6 {
+			description = record[6]
 		}
 
 		device := Device{
@@ -494,6 +546,7 @@ func readDevicesFromCSV(filePath string) ([]Device, error) {
 			DevEui:          devEUI,
 			NwkKey:          appKey,
 			JoinEui:         joinEUI,
+			ProcessorID:     processorID,
 			Description:     description,
 		}
 
@@ -526,14 +579,27 @@ func validateHexString(s string, expectedLength int, fieldName string) error {
 }
 
 func (s *simulation) setupDevices() error {
-	log.Info("simulator: init devices")
+	log.Info("simulator: setupDevices called - starting device initialization")
+	log.WithFields(log.Fields{
+		"device_count":       len(s.deviceAppKeys),
+		"join_eui_count":     len(s.deviceJoinEUIs),
+		"processor_id_count": len(s.deviceProcessorIDs),
+	}).Info("simulator: current state before setup")
 
 	var wg sync.WaitGroup
 
+	// Инициализируем карту для JoinEUI
+	s.deviceJoinEUIs = make(map[lorawan.EUI64]lorawan.EUI64)
+	// Инициализируем карту для ProcessorID
+	s.deviceProcessorIDs = make(map[lorawan.EUI64]string)
+
 	devices, err := readDevicesFromCSV("devices.csv")
 	if err != nil {
-		log.Fatal(err)
+		log.WithError(err).Error("simulator: failed to read devices from CSV")
+		return err
 	}
+
+	log.WithField("total_devices", len(devices)).Info("simulator: starting to process devices from CSV")
 
 	for _, device := range devices {
 		wg.Add(1)
@@ -568,6 +634,14 @@ func (s *simulation) setupDevices() error {
 					log.WithError(err).WithField("join_eui", dev.JoinEui).Error("simulator: invalid JoinEUI")
 					return
 				}
+			} else {
+				// Если JoinEUI не указан, используем значение по умолчанию
+				// Это стандартный JoinEUI для тестирования
+				joinEUI = lorawan.EUI64{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+				log.WithFields(log.Fields{
+					"dev_eui":  devEUI.String(),
+					"join_eui": joinEUI.String(),
+				}).Info("simulator: using default JoinEUI for device")
 			}
 
 			_, err := as.Device().Create(context.Background(), &api.CreateDeviceRequest{
@@ -580,7 +654,8 @@ func (s *simulation) setupDevices() error {
 				},
 			})
 			if err != nil {
-				log.Fatal("create device error, error: %s", err)
+				log.WithError(err).WithField("dev_eui", devEUI.String()).Error("simulator: create device error")
+				return
 			}
 
 			_, err = as.Device().CreateKeys(context.Background(), &api.CreateDeviceKeysRequest{
@@ -593,7 +668,8 @@ func (s *simulation) setupDevices() error {
 				},
 			})
 			if err != nil {
-				log.Fatal("create device keys error, error: %s", err)
+				log.WithError(err).WithField("dev_eui", devEUI.String()).Error("simulator: create device keys error")
+				return
 			}
 
 			log.WithFields(log.Fields{
@@ -605,6 +681,20 @@ func (s *simulation) setupDevices() error {
 			s.deviceAppKeysMutex.Lock()
 			s.deviceAppKeys[devEUI] = appKey
 			s.deviceAppKeysMutex.Unlock()
+
+			// Добавляем JoinEUI в карту
+			s.deviceJoinEUIsMutex.Lock()
+			s.deviceJoinEUIs[devEUI] = joinEUI
+			s.deviceJoinEUIsMutex.Unlock()
+			// Добавляем ProcessorID в карту
+			s.deviceProcessorIDsMutex.Lock()
+			s.deviceProcessorIDs[devEUI] = dev.ProcessorID
+			s.deviceProcessorIDsMutex.Unlock()
+
+			log.WithFields(log.Fields{
+				"dev_eui":      devEUI.String(),
+				"processor_id": dev.ProcessorID,
+			}).Info("simulator: processor ID set for device")
 		}(device)
 
 	}
@@ -658,6 +748,20 @@ func (s *simulation) setupDevices() error {
 	//}
 
 	wg.Wait()
+
+	log.WithFields(log.Fields{
+		"device_count":       len(s.deviceAppKeys),
+		"join_eui_count":     len(s.deviceJoinEUIs),
+		"processor_id_count": len(s.deviceProcessorIDs),
+	}).Info("simulator: devices setup completed")
+
+	// Логируем содержимое карт для отладки
+	for devEUI, processorID := range s.deviceProcessorIDs {
+		log.WithFields(log.Fields{
+			"dev_eui":      devEUI.String(),
+			"processor_id": processorID,
+		}).Info("simulator: device processor ID mapping")
+	}
 
 	return nil
 }
@@ -720,13 +824,22 @@ func CreateSingleDevice(device Device) error {
 		return fmt.Errorf("invalid DeviceProfileId: %v", err)
 	}
 
+	// Получаем appID из конфигурации
+	appID := "47924079-ed92-4a16-9b99-3a81ef434360" // значение по умолчанию
+	if len(config.C.Simulator) > 0 && config.C.Simulator[0].AppID != "" {
+		appID = config.C.Simulator[0].AppID
+		log.WithField("app_id", appID).Info("simulator: using app_id from config")
+	} else {
+		log.Info("simulator: using default app_id")
+	}
+
 	// Создаем устройство
 	_, err = as.Device().Create(context.Background(), &api.CreateDeviceRequest{
 		Device: &api.Device{
 			DevEui:          devEUI.String(),
 			Name:            device.Name,
 			Description:     device.Description,
-			ApplicationId:   "bfc3a3c5-7509-4ee6-8d76-786910333738", // Используем тот же ID что и в основной симуляции
+			ApplicationId:   appID,
 			DeviceProfileId: deviceProfileID.String(),
 		},
 	})
@@ -762,16 +875,24 @@ func DeleteSingleDevice(devEUI string) error {
 
 // StartWithDevices запускает симуляцию с конкретным списком устройств
 func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Config, devices []DeviceWithStatus) error {
+	log.Info("simulator: StartWithDevices function called")
 	log.WithField("device_count", len(devices)).Info("simulator: starting with custom device list")
 
+	// Добавляем логирование для отладки
+	log.Info("simulator: DEBUG: About to process devices")
+
 	sim := &simulation{
-		deviceAppKeys:  make(map[lorawan.EUI64]lorawan.AES128Key),
-		deviceJoinEUIs: make(map[lorawan.EUI64]lorawan.EUI64),
+		deviceAppKeys:      make(map[lorawan.EUI64]lorawan.AES128Key),
+		deviceJoinEUIs:     make(map[lorawan.EUI64]lorawan.EUI64),
+		deviceProcessorIDs: make(map[lorawan.EUI64]string),
 	}
 
 	// Align runtime parameters with main simulation using configuration
 	if len(config.Simulator) > 0 {
 		sc := config.Simulator[0]
+		sim.tenantID = sc.TenantID
+		sim.gatewayID = sc.GatewayID
+		sim.appID = sc.AppID
 		sim.uplinkInterval = sc.Device.UplinkInterval
 		sim.fPort = sc.Device.FPort
 		sim.activationTime = sc.ActivationTime
@@ -788,8 +909,17 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 		sim.spreadingFactor = sc.Device.SpreadingFactor
 		sim.eventTopicTemplate = sc.Gateway.EventTopicTemplate
 		sim.commandTopicTemplate = sc.Gateway.CommandTopicTemplate
+
+		log.WithFields(log.Fields{
+			"tenant_id":  sim.tenantID,
+			"gateway_id": sim.gatewayID,
+			"app_id":     sim.appID,
+		}).Info("simulator: using configuration values")
 	} else {
 		// Sensible defaults if config not provided
+		sim.tenantID = ""
+		sim.gatewayID = ""
+		sim.appID = ""
 		sim.uplinkInterval = 30 * time.Second
 		sim.fPort = 10
 		sim.payload = []byte{1, 2, 3, 4, 5}
@@ -798,15 +928,42 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 		sim.spreadingFactor = 7
 		sim.activationTime = 1 * time.Minute
 		sim.duration = 0 // infinite by default
-		sim.eventTopicTemplate = "ru868/gateway/{{ .GatewayID }}/event/{{ .Event }}"
-		sim.commandTopicTemplate = "ru868/gateway/{{ .GatewayID }}/command/{{ .Command }}"
+		sim.eventTopicTemplate = "ru864/gateway/{{ .GatewayID }}/event/{{ .Event }}"
+		sim.commandTopicTemplate = "ru864/gateway/{{ .GatewayID }}/command/{{ .Command }}"
+
+		log.Info("simulator: using default values (no config provided)")
 	}
 
 	// Заполняем карту ключей устройств
+	log.WithField("total_devices", len(devices)).Info("simulator: processing devices for simulation")
+
+	// Отладочное логирование входящих устройств
+	log.Info("simulator: DEBUG: Incoming devices details:")
+	for i, device := range devices {
+		log.WithFields(log.Fields{
+			"index":        i,
+			"name":         device.Name,
+			"dev_eui":      device.DevEui,
+			"processor_id": device.ProcessorID,
+			"type":         fmt.Sprintf("%T", device.ProcessorID),
+			"len":          len(device.ProcessorID),
+			"is_empty":     device.ProcessorID == "",
+			"is_none":      device.ProcessorID == "none",
+			"active":       device.Active,
+		}).Info("simulator: device details from CSV")
+	}
+
 	for _, device := range devices {
 		if !device.Active {
+			log.WithField("dev_eui", device.DevEui).Debug("simulator: skipping inactive device")
 			continue // пропускаем неактивные устройства
 		}
+
+		log.WithFields(log.Fields{
+			"dev_eui":      device.DevEui,
+			"processor_id": device.ProcessorID,
+			"active":       device.Active,
+		}).Info("simulator: processing active device")
 
 		var devEUI lorawan.EUI64
 		var appKey lorawan.AES128Key
@@ -835,6 +992,40 @@ func StartWithDevices(ctx context.Context, wg *sync.WaitGroup, config config.Con
 
 		sim.deviceAppKeys[devEUI] = appKey
 		sim.deviceJoinEUIs[devEUI] = joinEUI
+
+		// Добавляем ProcessorID
+		if device.ProcessorID != "" {
+			sim.deviceProcessorIDs[devEUI] = device.ProcessorID
+			log.WithFields(log.Fields{
+				"dev_eui":      devEUI.String(),
+				"processor_id": device.ProcessorID,
+				"type":         fmt.Sprintf("%T", device.ProcessorID),
+				"len":          len(device.ProcessorID),
+			}).Info("simulator: processor ID set for device")
+		} else {
+			sim.deviceProcessorIDs[devEUI] = "none"
+			log.WithFields(log.Fields{
+				"dev_eui":      devEUI.String(),
+				"processor_id": "none",
+				"type":         fmt.Sprintf("%T", device.ProcessorID),
+				"len":          len(device.ProcessorID),
+			}).Info("simulator: default processor ID set for device")
+		}
+	}
+
+	// Логируем состояние карт после обработки устройств
+	log.WithFields(log.Fields{
+		"device_count":       len(sim.deviceAppKeys),
+		"join_eui_count":     len(sim.deviceJoinEUIs),
+		"processor_id_count": len(sim.deviceProcessorIDs),
+	}).Info("simulator: device maps state after processing devices")
+
+	// Логируем содержимое карты ProcessorID для отладки
+	for devEUI, processorID := range sim.deviceProcessorIDs {
+		log.WithFields(log.Fields{
+			"dev_eui":      devEUI.String(),
+			"processor_id": processorID,
+		}).Info("simulator: device processor ID mapping after processing")
 	}
 
 	// Настраиваем приложение и интеграцию, как в основной симуляции
@@ -868,11 +1059,10 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 	log.WithField("device_count", len(s.deviceAppKeys)).Info("simulator: number of devices to simulate")
 
 	// Применяем duration из конфига как в основной симуляции
+	// Не устанавливаем таймаут для основного контекста, чтобы устройства могли работать
 	if s.duration != 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.duration)
-		defer cancel()
 		log.WithField("duration", s.duration).Info("simulator: simulation will run for duration")
+		// Не устанавливаем таймаут для основного контекста, чтобы устройства могли работать
 	}
 
 	// Создаем шлюзы (используем конфигурацию по умолчанию)
@@ -884,8 +1074,65 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 
 	// Запускаем устройства
 	deviceCount := 0
+	var deviceWg sync.WaitGroup
+
+	// Логируем состояние карт перед запуском устройств
+	log.WithFields(log.Fields{
+		"device_count":       len(s.deviceAppKeys),
+		"join_eui_count":     len(s.deviceJoinEUIs),
+		"processor_id_count": len(s.deviceProcessorIDs),
+	}).Info("simulator: device maps state before starting devices")
+
+	// Логируем содержимое карты ProcessorID для отладки
+	for devEUI, processorID := range s.deviceProcessorIDs {
+		log.WithFields(log.Fields{
+			"dev_eui":      devEUI.String(),
+			"processor_id": processorID,
+			"type":         fmt.Sprintf("%T", processorID),
+			"len":          len(processorID),
+			"is_empty":     processorID == "",
+			"is_none":      processorID == "none",
+		}).Debug("simulator: device processor ID mapping before start")
+	}
+
+	// Дополнительное отладочное логирование
+	log.Info("simulator: DEBUG: Full deviceProcessorIDs map:")
+	for devEUI, processorID := range s.deviceProcessorIDs {
+		log.WithFields(log.Fields{
+			"dev_eui":      devEUI.String(),
+			"processor_id": processorID,
+			"type":         fmt.Sprintf("%T", processorID),
+			"len":          len(processorID),
+			"is_empty":     processorID == "",
+			"is_none":      processorID == "none",
+		}).Info("simulator: processor ID map entry")
+	}
+
+	// Дополнительное отладочное логирование для deviceAppKeys
+	log.Info("simulator: DEBUG: Full deviceAppKeys map:")
 	for devEUI, appKey := range s.deviceAppKeys {
+		log.WithFields(log.Fields{
+			"dev_eui": devEUI.String(),
+			"app_key": appKey.String(),
+		}).Info("simulator: app key map entry")
+	}
+
+	for devEUI, appKey := range s.deviceAppKeys {
+		log.WithFields(log.Fields{
+			"dev_eui":      devEUI.String(),
+			"app_key":      appKey.String(),
+			"processor_id": s.deviceProcessorIDs[devEUI],
+			"join_eui":     s.deviceJoinEUIs[devEUI],
+		}).Info("simulator: processing device in loop")
+
+		deviceWg.Add(1)
 		go func(devEUI lorawan.EUI64, appKey lorawan.AES128Key) {
+			defer deviceWg.Done()
+
+			// Создаем отдельный контекст для каждого устройства
+			deviceCtx, deviceCancel := context.WithCancel(context.Background())
+			defer deviceCancel()
+
 			// Получаем JoinEUI из карты
 			joinEUI, exists := s.deviceJoinEUIs[devEUI]
 			if !exists {
@@ -893,20 +1140,34 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 				return
 			}
 
+			// Получаем ProcessorID
+			processorID, exists := s.deviceProcessorIDs[devEUI]
+			if !exists {
+				log.WithField("dev_eui", devEUI).Warn("ProcessorID not found for device, using default")
+				processorID = "none"
+			}
+
 			log.WithFields(log.Fields{
-				"dev_eui":  devEUI,
-				"join_eui": joinEUI,
+				"dev_eui":      devEUI,
+				"join_eui":     joinEUI,
+				"processor_id": processorID,
+				"type":         fmt.Sprintf("%T", processorID),
+				"len":          len(processorID),
+				"is_empty":     processorID == "",
+				"is_none":      processorID == "none",
+				"exists":       exists,
 			}).Info("simulator: creating device")
 
 			// Создаем устройство симулятора с правильными параметрами для OTAA
 			// Используем activationTime для рандомизации OTAA delay как в основной симуляции
 			otaaDelay := time.Duration(mrand.Int63n(int64(s.activationTime)))
 			_, err := simulator.NewDevice(
-				ctx,
+				deviceCtx,
 				wg,
 				simulator.WithDevEUI(devEUI),
 				simulator.WithJoinEUI(joinEUI),
 				simulator.WithAppKey(appKey),
+				simulator.WithProcessorID(processorID),
 				simulator.WithRandomDevNonce(),
 				simulator.WithGateways(gws),
 				simulator.WithOTAADelay(otaaDelay),
@@ -931,11 +1192,26 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 			}
 
 			log.WithField("dev_eui", devEUI).Info("simulator: device simulation started")
+
+			// Ждем завершения устройства или отмены основного контекста
+			select {
+			case <-ctx.Done():
+				log.WithField("dev_eui", devEUI).Info("simulator: main context cancelled, stopping device")
+				deviceCancel()
+			case <-deviceCtx.Done():
+				log.WithField("dev_eui", devEUI).Info("simulator: device context cancelled")
+			}
 		}(devEUI, appKey)
 		deviceCount++
 	}
 
 	log.WithField("devices_started", deviceCount).Info("simulator: all devices started")
+
+	// Ждем завершения всех устройств или отмены контекста
+	go func() {
+		deviceWg.Wait()
+		log.Info("simulator: all devices completed")
+	}()
 
 	return nil
 }
@@ -944,8 +1220,22 @@ func (s *simulation) startDeviceSimulation(ctx context.Context, wg *sync.WaitGro
 func (s *simulation) createGateways(ctx context.Context, wg *sync.WaitGroup) ([]*simulator.Gateway, error) {
 	// Создаем один шлюз для симуляции
 	var gatewayID lorawan.EUI64
-	// Используем прямое присваивание байтов для правильного порядка
-	gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+
+	// Если gatewayID задан в конфигурации, используем его
+	if s.gatewayID != "" {
+		// Парсим gatewayID из строки в EUI64
+		if err := gatewayID.UnmarshalText([]byte(s.gatewayID)); err != nil {
+			log.WithError(err).Warn("simulator: failed to parse gateway_id from config, using default")
+			// Используем прямое присваивание байтов для правильного порядка
+			gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+		} else {
+			log.WithField("gateway_id", s.gatewayID).Info("simulator: using gateway_id from config")
+		}
+	} else {
+		// Используем прямое присваивание байтов для правильного порядка
+		gatewayID = lorawan.EUI64{0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80}
+		log.Info("simulator: using default gateway_id")
+	}
 
 	gw, err := simulator.NewGateway(
 		simulator.WithGatewayID(gatewayID),

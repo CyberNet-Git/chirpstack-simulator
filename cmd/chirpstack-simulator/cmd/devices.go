@@ -186,15 +186,33 @@ func readDevicesFromCSVWithStatus(filePath string) ([]simulator.DeviceWithStatus
 			}
 		}
 
-		description := ""
-		if len(record) > 5 {
-			description = record[5]
+		// ProcessorID опционально (6-я колонка)
+		processorID := ""
+		if len(record) > 5 && record[5] != "" {
+			processorID = record[5]
 		}
 
-		// Проверяем статус активности (7-я колонка, если есть)
+		// Отладочное логирование для диагностики
+		log.WithFields(log.Fields{
+			"row":          i + 1,
+			"name":         record[0],
+			"dev_eui":      devEUI,
+			"processor_id": processorID,
+			"record_len":   len(record),
+			"record_5":     record[5],
+			"record_6":     record[6],
+			"record_7":     record[7],
+		}).Debug("CSV parsing debug info")
+
+		description := ""
+		if len(record) > 6 {
+			description = record[6]
+		}
+
+		// Проверяем статус активности (8-я колонка, если есть)
 		active := true // по умолчанию активно
-		if len(record) > 6 && record[6] != "" {
-			switch record[6] {
+		if len(record) > 7 && record[7] != "" {
+			switch record[7] {
 			case "true", "1", "active", "да", "активно":
 				active = true
 			case "false", "0", "inactive", "нет", "неактивно":
@@ -209,10 +227,24 @@ func readDevicesFromCSVWithStatus(filePath string) ([]simulator.DeviceWithStatus
 				DevEui:          devEUI,
 				NwkKey:          appKey,
 				JoinEui:         joinEUI,
+				ProcessorID:     processorID,
 				Description:     description,
 			},
 			Active: active,
 		}
+
+		// Отладочное логирование созданного устройства
+		log.WithFields(log.Fields{
+			"row":          i + 1,
+			"name":         device.Name,
+			"dev_eui":      device.DevEui,
+			"processor_id": device.ProcessorID,
+			"type":         fmt.Sprintf("%T", device.ProcessorID),
+			"len":          len(device.ProcessorID),
+			"is_empty":     device.ProcessorID == "",
+			"is_none":      device.ProcessorID == "none",
+			"active":       device.Active,
+		}).Info("Device created from CSV")
 
 		devices = append(devices, device)
 	}
@@ -361,6 +393,18 @@ func simulateDevices(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Отладочное логирование загруженных устройств
+	log.Info("Загруженные устройства из CSV:")
+	for i, device := range devices {
+		log.WithFields(log.Fields{
+			"index":        i,
+			"name":         device.Name,
+			"dev_eui":      device.DevEui,
+			"processor_id": device.ProcessorID,
+			"active":       device.Active,
+		}).Info("Устройство из CSV")
+	}
+
 	// Фильтруем только активные устройства
 	var activeDevices []simulator.DeviceWithStatus
 	for _, device := range devices {
@@ -394,6 +438,20 @@ func simulateDevices(cmd *cobra.Command, args []string) error {
 	createWG.Wait()
 
 	// Запускаем симуляцию с активными устройствами
+	log.Info("Запуск симуляции с активными устройствами")
+	for _, device := range activeDevices {
+		log.WithFields(log.Fields{
+			"dev_eui":      device.DevEui,
+			"name":         device.Name,
+			"processor_id": device.ProcessorID,
+			"type":         fmt.Sprintf("%T", device.ProcessorID),
+			"len":          len(device.ProcessorID),
+			"is_empty":     device.ProcessorID == "",
+			"is_none":      device.ProcessorID == "none",
+			"active":       device.Active,
+		}).Info("Устройство для симуляции")
+	}
+
 	if err := simulator.StartWithDevices(ctx, &wg, config.C, activeDevices); err != nil {
 		return errors.Wrap(err, "ошибка запуска симуляции")
 	}

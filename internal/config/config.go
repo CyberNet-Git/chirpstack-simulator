@@ -41,6 +41,8 @@ type Config struct {
 
 	Simulator []struct {
 		TenantID       string        `mapstructure:"tenant_id"`
+		GatewayID      string        `mapstructure:"gateway_id"`
+		AppID          string        `mapstructure:"app_id"`
 		Duration       time.Duration `mapstructure:"duration"`
 		ActivationTime time.Duration `mapstructure:"activation_time"`
 
