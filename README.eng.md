@@ -1,30 +1,32 @@
 # ChirpStack Simulator
 
-ChirpStack Simulator — симулятор с открытым исходным кодом для сетевого сервера
-LoRaWAN<sup>&reg;</sup> ChirpStack (v4). Он моделирует заданное количество устройств и
-шлюзов, которые автоматически создаются при запуске симуляции.
+ChirpStack Simulator is an open-source simulator for the [ChirpStack](https://www.chirpstack.io)
+open-source LoRaWAN<sup>&reg;</sup> Network-Server (v4). It simulates
+a configurable number of devices and gateways, which will be automatically
+created on starting the simulation.
 
-Проект разработан совместно с [TWTG](https://www.twtg.io/).
+This project has been developed together with [TWTG](https://www.twtg.io/).
 
-## Сборка
+## Building
 
-Рекомендуемый способ сборки — [Docker Compose](https://docs.docker.com/compose/). Пример:
+The recommended way to compile the simulator code is using [Docker Compose](https://docs.docker.com/compose/).
+Example:
 
 ```bash
 docker-compose run --rm chirpstack-simulator make clean build
 ```
 
-Готовый бинарный файл будет расположен в `build/chirpstack-simulator`.
+The binary will be located under `build/chirpstack-simulator`.
 
-## Конфигурация
+## Configuration
 
-Для генерации шаблона конфигурации выполните:
+For generating a configuration template, use the following command:
 
 ```bash
 ./build/chirpstack-simulator configfile > chirpstack-simulator.toml
 ```
 
-### Пример
+### Example
 
 ```toml
 [general]
@@ -171,36 +173,38 @@ activation_time="1m"
 bind="0.0.0.0:9000"
 ```
 
-## Запуск симулятора
+## Running the simulator
 
-Для запуска симулятора выполните:
+To start the simulator, execute the following command:
 
 ```bash
 ./build/chirpstack-simulator -c chirpstack-simulator.toml
 ```
 
-Если задан параметр `duration`, симуляция завершится по истечении указанного
-интервала. Процесс при этом остаётся запущенным, что позволяет продолжать
-сбор метрик Prometheus после завершения симуляции.
+When a duration has been configured, then the simulation will stop after
+the given interval. Note that this does not terminate the process! This makes
+it possible to still read Prometheus metrics after the simulation has been
+completed.
 
-Независимо от значения `duration` симулятор можно остановить вручную.
-При первом сигнале прерывания выполняется корректное завершение симуляции и
-очистка созданных шлюзов, устройств, приложения и профилей устройств.
-Повторный сигнал прерывания завершает процесс немедленно.
+Regardless if a duration has been configured or not, the simulator can be
+terminated. When sending an interrupt signal once, the simulation will be
+terminated and the simulator will clean up the created gateways, devices,
+application and device-profile. When sending an interrupt for the second time,
+the simulator will be terminated immediately.
 
-## Метрики Prometheus
+## Prometheus metrics
 
-ChirpStack Simulator экспортирует метрики, которые можно собирать с помощью
-[Prometheus](https://prometheus.io/) и визуализировать в [Grafana](https://grafana.com/).
+The ChirpStack Simulator provides various metrics that can be collected using
+[Prometheus](https://prometheus.io/) and visualized using [Grafana](https://grafana.com/).
 
-* `device_uplink_count`: число uplink-сообщений, отправленных устройствами
-* `device_join_request_count`: число сообщений join-request, отправленных устройствами
-* `device_join_accept_count`: число сообщений join-accept, полученных устройствами
-* `application_uplink_count`: число uplink-сообщений, опубликованных интеграцией приложения
-* `gateway_uplink_count`: число uplink-сообщений, отправленных шлюзами
-* `gateway_downlink_count`: число downlink-сообщений, полученных шлюзами
+* `device_uplink_count`: The number of uplinks sent by the devices
+* `device_join_request_count`: The number of join-requests sent by the devices
+* `device_join_accept_count`: The number of join-accepts received by the devices
+* `application_uplink_count`: The number of uplinks published by the application integration
+* `gateway_uplink_count`: The number of uplinks sent by the gateways
+* `gateway_downlink_count`: The number of downlinks received by the gateways
 
-## Лицензия
+## License
 
-ChirpStack Simulator распространяется по лицензии MIT. См. также
+ChirpStack Simulator is distributed under the MIT license. See also
 [LICENSE](https://github.com/brocaar/chirpstack-simulator/blob/master/LICENSE).
