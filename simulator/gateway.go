@@ -198,16 +198,19 @@ func NewGateway(opts ...GatewayOption) (*Gateway, error) {
 		"gateway_id": gw.gatewayID,
 		"topic":      downlinkTopic,
 	}).Info("simulator: subscribing to gateway mqtt topic")
-	for {
-		if token := gw.mqtt.Subscribe(downlinkTopic, 0, gw.downlinkEventHandler); token.Wait() && token.Error() != nil {
-			log.WithError(token.Error()).WithFields(log.Fields{
-				"gateway_id": gw.gatewayID,
-				"topic":      downlinkTopic,
-			}).Error("simulator: subscribe to mqtt topic error")
-			time.Sleep(time.Second * 2)
-		} else {
-			break
-		}
+
+	// Добавляем логирование успешной подписки
+	if token := gw.mqtt.Subscribe(downlinkTopic, 0, gw.downlinkEventHandler); token.Wait() && token.Error() != nil {
+		log.WithError(token.Error()).WithFields(log.Fields{
+			"gateway_id": gw.gatewayID,
+			"topic":      downlinkTopic,
+		}).Error("simulator: subscribe to mqtt topic error")
+		return nil, errors.Wrap(token.Error(), "mqtt subscribe error")
+	} else {
+		log.WithFields(log.Fields{
+			"gateway_id": gw.gatewayID,
+			"topic":      downlinkTopic,
+		}).Info("simulator: successfully subscribed to downlink topic")
 	}
 
 	return gw, nil
@@ -309,6 +312,12 @@ func (g *Gateway) getCommandTopic(command string) string {
 }
 
 func (g *Gateway) downlinkEventHandler(c mqtt.Client, msg mqtt.Message) {
+	log.WithFields(log.Fields{
+		"gateway_id":   g.gatewayID,
+		"topic":        msg.Topic(),
+		"payload_size": len(msg.Payload()),
+	}).Info("simulator: downlink command received")
+
 	g.deviceMux.RLock()
 	defer g.deviceMux.RUnlock()
 
@@ -322,13 +331,21 @@ func (g *Gateway) downlinkEventHandler(c mqtt.Client, msg mqtt.Message) {
 	var pl gw.DownlinkFrame
 	if err := proto.Unmarshal(msg.Payload(), &pl); err != nil {
 		log.WithError(err).Error("simulator: unmarshal downlink command error")
+		return
 	}
+
+	log.WithFields(log.Fields{
+		"gateway_id":    g.gatewayID,
+		"downlink_id":   pl.DownlinkId,
+		"items_count":   len(pl.Items),
+		"devices_count": len(g.devices),
+	}).Info("simulator: downlink frame unmarshaled successfully")
 
 	for devEUI, downChan := range g.devices {
 		log.WithFields(log.Fields{
 			"dev_eui":    devEUI,
 			"gateway_id": g.gatewayID,
-		}).Debug("simulator: forwarding downlink to device")
+		}).Info("simulator: forwarding downlink to device")
 		downChan <- pl
 	}
 

@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/brocaar/chirpstack-simulator/internal/cpuinfo"
 	"github.com/brocaar/lorawan"
 	"github.com/chirpstack/chirpstack/api/go/v4/gw"
 )
@@ -47,6 +49,9 @@ type Device struct {
 
 	// AppKey.
 	appKey lorawan.AES128Key
+
+	// Processor ID for CPU info payload
+	processorID string
 
 	// Interval in which device sends uplinks.
 	uplinkInterval time.Duration
@@ -125,6 +130,24 @@ func WithDevEUI(devEUI lorawan.EUI64) DeviceOption {
 func WithJoinEUI(joinEUI lorawan.EUI64) DeviceOption {
 	return func(d *Device) error {
 		d.joinEUI = joinEUI
+		return nil
+	}
+}
+
+// WithProcessorID sets the processor ID for CPU info payload.
+func WithProcessorID(processorID string) DeviceOption {
+	return func(d *Device) error {
+		log.WithFields(log.Fields{
+			"dev_eui":          d.devEUI,
+			"old_processor_id": d.processorID,
+			"new_processor_id": processorID,
+			"type":             fmt.Sprintf("%T", processorID),
+			"len":              len(processorID),
+			"is_empty":         processorID == "",
+			"is_none":          processorID == "none",
+		}).Info("simulator: setting processor ID")
+
+		d.processorID = processorID
 		return nil
 	}
 }
@@ -221,8 +244,13 @@ func NewDevice(ctx context.Context, wg *sync.WaitGroup, opts ...DeviceOption) (*
 	}
 
 	log.WithFields(log.Fields{
-		"dev_eui": d.devEUI,
-	}).Info("simulator: new otaa device")
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"type":         fmt.Sprintf("%T", d.processorID),
+		"len":          len(d.processorID),
+		"is_empty":     d.processorID == "",
+		"is_none":      d.processorID == "none",
+	}).Info("simulator: new otaa device created")
 
 	wg.Add(2)
 
@@ -235,23 +263,41 @@ func NewDevice(ctx context.Context, wg *sync.WaitGroup, opts ...DeviceOption) (*
 // uplinkLoop first handle the OTAA activation, after which it will periodically
 // sends an uplink with the configured payload and fport.
 func (d *Device) uplinkLoop() {
-	defer d.cancel()
-	defer d.wg.Done()
+	defer func() {
+		fmt.Printf("DEBUG: Device %s uplinkLoop defer called\n", d.devEUI)
+		d.cancel()
+		d.wg.Done()
+		fmt.Printf("DEBUG: Device %s uplinkLoop completed\n", d.devEUI)
+	}()
 
 	var cancelled bool
 	go func() {
 		<-d.ctx.Done()
+		fmt.Printf("DEBUG: Device %s context cancelled, setting cancelled=true\n", d.devEUI)
 		cancelled = true
 	}()
 
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device uplink loop started, waiting for OTAA delay")
 	time.Sleep(d.otaaDelay)
+	log.WithField("dev_eui", d.devEUI).Info("simulator: OTAA delay completed, starting device loop")
+	fmt.Printf("DEBUG: Device %s entering main loop\n", d.devEUI)
 
 	for !cancelled {
-		switch d.getState() {
+		fmt.Printf("DEBUG: Device %s loop iteration, cancelled=%v\n", d.devEUI, cancelled)
+		currentState := d.getState()
+		fmt.Printf("DEBUG: Device %s current state: %d\n", d.devEUI, currentState)
+
+		switch currentState {
 		case deviceStateOTAA:
+			fmt.Printf("DEBUG: Device %s is about to send join request\n", d.devEUI)
+			log.WithField("dev_eui", d.devEUI).Info("simulator: device in OTAA state, sending join request")
 			d.joinRequest()
+			fmt.Printf("DEBUG: Device %s join request completed\n", d.devEUI)
+			log.WithField("dev_eui", d.devEUI).Info("simulator: join request sent, waiting 6 seconds")
 			time.Sleep(6 * time.Second)
 		case deviceStateActivated:
+			fmt.Printf("DEBUG: Device %s is activated, sending data uplink\n", d.devEUI)
+			log.WithField("dev_eui", d.devEUI).Debug("simulator: device activated, sending data uplink")
 			d.dataUp()
 
 			if d.uplinkCount != 0 {
@@ -266,8 +312,12 @@ func (d *Device) uplinkLoop() {
 			}
 
 			time.Sleep(d.uplinkInterval)
+		default:
+			fmt.Printf("DEBUG: Device %s unknown state: %d\n", d.devEUI, currentState)
 		}
 	}
+
+	fmt.Printf("DEBUG: Device %s main loop completed\n", d.devEUI)
 }
 
 // downlinkLoop handles the downlink messages.
@@ -277,13 +327,27 @@ func (d *Device) downlinkLoop() {
 	defer d.cancel()
 	defer d.wg.Done()
 
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device downlink loop started")
+
 	for {
 		select {
 		case <-d.ctx.Done():
+			log.WithField("dev_eui", d.devEUI).Info("simulator: device downlink loop context cancelled")
 			return
 
 		case pl := <-d.downlinkFrames:
-			for _, item := range pl.Items {
+			log.WithFields(log.Fields{
+				"dev_eui": d.devEUI,
+				"frames":  len(pl.Items),
+			}).Info("simulator: device received downlink frame")
+
+			for i, item := range pl.Items {
+				log.WithFields(log.Fields{
+					"dev_eui": d.devEUI,
+					"frame":   i,
+					"size":    len(item.PhyPayload),
+				}).Debug("simulator: processing downlink frame item")
+
 				err := func() error {
 					var phy lorawan.PHYPayload
 
@@ -291,21 +355,32 @@ func (d *Device) downlinkLoop() {
 						return errors.Wrap(err, "unmarshal phypayload error")
 					}
 
+					log.WithFields(log.Fields{
+						"dev_eui": d.devEUI,
+						"mtype":   phy.MHDR.MType,
+						"major":   phy.MHDR.Major,
+					}).Info("simulator: device processing downlink message")
+
 					switch phy.MHDR.MType {
 					case lorawan.JoinAccept:
+						log.WithField("dev_eui", d.devEUI).Info("simulator: device received JoinAccept message")
 						return d.joinAccept(phy)
 					case lorawan.UnconfirmedDataDown, lorawan.ConfirmedDataDown:
+						log.WithField("dev_eui", d.devEUI).Info("simulator: device received DataDown message")
 						return d.downlinkData(phy)
+					default:
+						log.WithFields(log.Fields{
+							"dev_eui": d.devEUI,
+							"mtype":   phy.MHDR.MType,
+						}).Warn("simulator: device received unknown message type")
 					}
 
 					return nil
 				}()
 
 				if err != nil {
-					log.WithError(err).Error("simulator: handle downlink frame error")
+					log.WithError(err).WithField("dev_eui", d.devEUI).Error("simulator: device downlink processing error")
 				}
-
-				break
 			}
 		}
 	}
@@ -313,9 +388,11 @@ func (d *Device) downlinkLoop() {
 
 // joinRequest sends the join-request.
 func (d *Device) joinRequest() {
+	fmt.Printf("DEBUG: joinRequest called for device %s\n", d.devEUI)
+
 	log.WithFields(log.Fields{
 		"dev_eui": d.devEUI,
-	}).Debug("simulator: send OTAA request")
+	}).Info("simulator: send OTAA request")
 
 	phy := lorawan.PHYPayload{
 		MHDR: lorawan.MHDR{
@@ -329,14 +406,111 @@ func (d *Device) joinRequest() {
 		},
 	}
 
+	log.WithFields(log.Fields{
+		"dev_eui":   d.devEUI,
+		"join_eui":  d.joinEUI,
+		"dev_nonce": d.devNonce,
+	}).Debug("simulator: join request payload created")
+
 	if err := phy.SetUplinkJoinMIC(d.appKey); err != nil {
 		log.WithError(err).Error("simulator: set uplink join mic error")
 		return
 	}
 
+	log.WithField("dev_eui", d.devEUI).Debug("simulator: join request MIC set, sending uplink")
 	d.sendUplink(phy)
+	log.WithField("dev_eui", d.devEUI).Info("simulator: join request sent successfully")
 
 	deviceJoinRequestCounter().Inc()
+}
+
+// generateCPUPayload генерирует payload на основе CPU info
+func (d *Device) generateCPUPayload() []byte {
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"type":         fmt.Sprintf("%T", d.processorID),
+		"len":          len(d.processorID),
+		"is_empty":     d.processorID == "",
+		"is_none":      d.processorID == "none",
+	}).Info("simulator: generating CPU payload")
+
+	// Если processorID не установлен или равен "none", используем значения по умолчанию
+	if d.processorID == "" || d.processorID == "none" {
+		log.WithFields(log.Fields{
+			"dev_eui":      d.devEUI,
+			"processor_id": d.processorID,
+		}).Info("simulator: using default payload (no processor ID)")
+		return d.generateDefaultPayload()
+	}
+
+	// Пытаемся получить CPU info для указанного процессора
+	processorID, err := strconv.ParseUint(d.processorID, 10, 8)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"dev_eui":      d.devEUI,
+			"processor_id": d.processorID,
+		}).Warn("simulator: invalid processor ID, using default payload")
+		return d.generateDefaultPayload()
+	}
+
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"parsed_id":    processorID,
+	}).Debug("simulator: attempting to get CPU info")
+
+	// Импортируем cpuinfo пакет
+	cpuInfo, err := cpuinfo.GetCPUInfo(uint8(processorID))
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"dev_eui":      d.devEUI,
+			"processor_id": d.processorID,
+		}).Warn("simulator: failed to get CPU info, using default payload")
+		return d.generateDefaultPayload()
+	}
+
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"cpu_mhz":      cpuInfo.CPUMHz,
+		"vendor_id":    cpuInfo.VendorID,
+	}).Info("simulator: successfully generated CPU payload")
+
+	return cpuInfo.ToPayload()
+}
+
+// generateDefaultPayload генерирует payload с значениями по умолчанию
+func (d *Device) generateDefaultPayload() []byte {
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"type":         fmt.Sprintf("%T", d.processorID),
+		"len":          len(d.processorID),
+		"is_empty":     d.processorID == "",
+		"is_none":      d.processorID == "none",
+	}).Info("simulator: generating default payload")
+
+	// Создаем payload: processor=0, cpu_mhz=0.0, vendor_id="unknown"
+	payload := make([]byte, 25)
+
+	// Processor ID - для устройств с processorID = "none" или пустым используем 0
+	payload[0] = 0
+
+	// CPU MHz = 0.0 (4 байта, little-endian)
+	binary.LittleEndian.PutUint32(payload[1:5], 0)
+
+	// Vendor ID = "unknown" (20 байт)
+	copy(payload[5:25], []byte("unknown"))
+
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"payload_0":    payload[0],
+		"payload_hex":  hex.EncodeToString(payload),
+	}).Info("simulator: default payload generated")
+
+	return payload
 }
 
 // dataUp sends an data uplink.
@@ -346,6 +520,21 @@ func (d *Device) dataUp() {
 		"dev_addr":  d.devAddr,
 		"confirmed": d.confirmed,
 	}).Debug("simulator: send uplink data")
+
+	// Генерируем payload на основе CPU info
+	payload := d.generateCPUPayload()
+
+	log.WithFields(log.Fields{
+		"dev_eui":      d.devEUI,
+		"processor_id": d.processorID,
+		"type":         fmt.Sprintf("%T", d.processorID),
+		"len":          len(d.processorID),
+		"is_empty":     d.processorID == "",
+		"is_none":      d.processorID == "none",
+		"payload_len":  len(payload),
+		"payload_0":    payload[0],
+		"payload_hex":  hex.EncodeToString(payload),
+	}).Info("simulator: generated payload for uplink")
 
 	mType := lorawan.UnconfirmedDataUp
 	if d.confirmed {
@@ -368,7 +557,7 @@ func (d *Device) dataUp() {
 			FPort: &d.fPort,
 			FRMPayload: []lorawan.Payload{
 				&lorawan.DataPayload{
-					Bytes: d.payload,
+					Bytes: payload,
 				},
 			},
 		},
@@ -393,46 +582,63 @@ func (d *Device) dataUp() {
 
 // joinAccept validates and handles the join-accept downlink.
 func (d *Device) joinAccept(phy lorawan.PHYPayload) error {
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device processing JoinAccept message")
+
 	err := phy.DecryptJoinAcceptPayload(d.appKey)
 	if err != nil {
+		log.WithError(err).WithField("dev_eui", d.devEUI).Error("simulator: device failed to decrypt JoinAccept payload")
 		return errors.Wrap(err, "decrypt join-accept payload error")
 	}
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device successfully decrypted JoinAccept payload")
 
 	ok, err := phy.ValidateDownlinkJoinMIC(lorawan.JoinRequestType, d.joinEUI, d.devNonce, d.appKey)
 	if err != nil {
-		log.WithFields(log.Fields{
+		log.WithError(err).WithFields(log.Fields{
 			"dev_eui": d.devEUI,
-		}).Debug("simulator: invalid join-accept MIC")
-		return nil
+		}).Error("simulator: device failed to validate JoinAccept MIC")
+		return errors.Wrap(err, "validate downlink join MIC error")
 	}
 	if !ok {
 		log.WithFields(log.Fields{
 			"dev_eui": d.devEUI,
-		}).Debug("simulator: invalid join-accept MIC")
-		return nil
+		}).Error("simulator: device JoinAccept MIC validation failed")
+		return errors.New("invalid join-accept MIC")
 	}
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device JoinAccept MIC validation successful")
 
 	jaPL, ok := phy.MACPayload.(*lorawan.JoinAcceptPayload)
 	if !ok {
+		log.WithField("dev_eui", d.devEUI).Error("simulator: device expected *lorawan.JoinAcceptPayload")
 		return errors.New("expected *lorawan.JoinAcceptPayload")
 	}
 
+	log.WithFields(log.Fields{
+		"dev_eui":     d.devEUI,
+		"home_net_id": jaPL.HomeNetID,
+		"join_nonce":  jaPL.JoinNonce,
+		"dev_nonce":   d.devNonce,
+	}).Info("simulator: device extracting session keys from JoinAccept")
+
 	d.appSKey, err = getAppSKey(jaPL.DLSettings.OptNeg, d.appKey, jaPL.HomeNetID, d.joinEUI, jaPL.JoinNonce, d.devNonce)
 	if err != nil {
+		log.WithError(err).WithField("dev_eui", d.devEUI).Error("simulator: device failed to derive AppSKey")
 		return errors.Wrap(err, "get AppSKey error")
 	}
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device AppSKey derived successfully")
 
 	d.nwkSKey, err = getFNwkSIntKey(jaPL.DLSettings.OptNeg, d.appKey, jaPL.HomeNetID, d.joinEUI, jaPL.JoinNonce, d.devNonce)
 	if err != nil {
+		log.WithError(err).WithField("dev_eui", d.devEUI).Error("simulator: device failed to derive NwkSKey")
 		return errors.Wrap(err, "get NwkSKey error")
 	}
+	log.WithField("dev_eui", d.devEUI).Info("simulator: device NwkSKey derived successfully")
 
 	d.devAddr = jaPL.DevAddr
 
 	log.WithFields(log.Fields{
 		"dev_eui":  d.devEUI,
 		"dev_addr": d.devAddr,
-	}).Info("simulator: device OTAA activated")
+	}).Info("simulator: device OTAA activated successfully")
 
 	d.setState(deviceStateActivated)
 	deviceJoinAcceptCounter().Inc()
@@ -549,9 +755,10 @@ func (d *Device) getState() deviceState {
 }
 
 // setState sets the device to the given state.
-func (d *Device) setState(s deviceState) {
+func (d *Device) setState(state deviceState) {
 	d.Lock()
-	d.Unlock()
+	defer d.Unlock()
 
-	d.state = s
+	fmt.Printf("DEBUG: Device %s state changing from %d to %d\n", d.devEUI, d.state, state)
+	d.state = state
 }
